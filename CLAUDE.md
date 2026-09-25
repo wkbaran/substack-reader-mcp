@@ -4,7 +4,8 @@ Common mistakes and confusion points in this project. Add to this list when some
 
 ## Substack API quirks
 
-- There is no official Substack API. Every endpoint here was found by observing the web app, and any of them can change without notice.
+- There is no official Substack API for what this project does. Every endpoint here was found by observing the web app, and any of them can change without notice. Substack does run a separate, limited "Developer API" (support.substack.com article 45099095296916, terms at substack.com/api-tos), and it is not the endpoints used here. `substackapi.dev` is a different product with its own API keys; its per-minute limits don't apply to us.
+- **No published rate limits for the web app endpoints** (checked 2026-09-25). The Developer API terms only say limits are "determined by Substack in its sole discretion", with no numbers.
 - `https://<sub>.substack.com/api/...` answers **301 to the custom domain** when the publication has one. That's why `SubstackHttp` follows redirects manually and decides per hop whether to attach the session cookie. Don't switch to `redirect: "follow"`. Whether fetch strips a manually set `Cookie` header on cross-origin redirects is not guaranteed, so we don't rely on it.
 - `/api/v1/posts/<slug>` returns the post object directly, but `/api/v1/posts/by-id/<id>` wraps it as `{ post: ... }`. `SubstackClient.post` handles both.
 - Paywalled posts return **HTTP 200 with a truncated `body_html`**, not an error, and no field says whether you got the full post. The reliable signal: when the viewer has access, `body_html` contains `<div class="paywall-jump">` where the paywall would be, and previews stop just before it. Word count alone is **not** enough: Lenny's Newsletter serves about 85% of the article as a free preview. `isPreview` in `format.ts` checks the marker first and uses word count only as a backup. Verified against real posts on 2026-09-25.

@@ -12,7 +12,7 @@ An MCP server that gives Claude (and any other MCP client) access to your Substa
 ![Tools](https://img.shields.io/badge/tools-12-informational)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 
-[Quick start](#quick-start) · [Other clients](#other-mcp-clients) · [Tools](#tools) · [Logging in](#logging-in) · [Privacy and security](#privacy-and-security) · [Troubleshooting](#troubleshooting)
+[Quick start](#quick-start) · [Other clients](#other-mcp-clients) · [Hermes digest](#daily-digest-with-hermes-agent) · [Tools](#tools) · [Logging in](#logging-in) · [Privacy and security](#privacy-and-security) · [Troubleshooting](#troubleshooting)
 
 </div>
 
@@ -122,6 +122,53 @@ Add to `.vscode/mcp.json` in a workspace, or to your user MCP configuration:
 claude mcp add --scope user substack-reader -- node /absolute/path/to/substack-reader-mcp/dist/cli.js
 ```
 </details>
+
+## Daily digest with Hermes Agent
+
+[`hermes/`](hermes/) contains a skill for [Hermes Agent](https://github.com/NousResearch/hermes-agent) that turns this server into a scheduled Substack digest. Each morning it collects every post published since the last run in your subscriptions, plus unread chats and DMs. Subagents read every post in full, and it sends one message: the posts worth reading in full (with a two-line summary and why), everything else grouped by publication, and a summary of your chats that puts anything addressed to you first.
+
+### Setup
+
+1. **Build the server** on your machine (`npm ci && npm run build`). Copy `dist/`, `package.json` and `package-lock.json` to a directory the Hermes container can see (for example `$HERMES_HOME/mcp/substack-reader-mcp`, which is `/opt/data/mcp/substack-reader-mcp` inside the official image), and install the runtime dependencies there:
+   ```bash
+   npm ci --omit=dev --omit=optional
+   ```
+   Node 20 or later works, including the Node 26 in the Hermes image.
+2. **Log in** on a machine with a browser (`node dist/cli.js login`), then copy `~/.config/substack-reader/auth.json` into a directory on the Hermes host, for example `$HERMES_HOME/mcp/substack-reader-home/`. Keep it at owner-only permissions.
+3. **Register the server** in Hermes's `config.yaml`:
+   ```yaml
+   mcp_servers:
+     substack-reader:
+       command: node
+       args: ["/opt/data/mcp/substack-reader-mcp/dist/cli.js"]
+       env:
+         SUBSTACK_READER_HOME: /opt/data/mcp/substack-reader-home
+   ```
+4. **Install the skill:** copy `hermes/SKILL.md` to `$HERMES_HOME/skills/productivity/substack-digest/SKILL.md`, and `hermes/substack_digest_start.sh` to `$HERMES_HOME/scripts/`. Optionally, copy `hermes/interests.example.md` to `STATE_DIR/interests.md` and edit it (see below).
+5. **Edit the Settings block** at the top of `SKILL.md`: `STATE_DIR`, `TIMEZONE`, `MAX_PARALLEL` and the `REAUTH` message.
+6. **Restart Hermes and schedule it.** Cron times are in the Hermes host's local time:
+   ```bash
+   hermes cron create "0 7 * * *" "Run the substack-digest skill and deliver the digest." \
+     --name substack-digest --skill substack-digest --script substack_digest_start.sh --deliver discord:<channel-id>
+   hermes cron run <job-id>   # try it once now
+   ```
+   Run `hermes cron` commands as the user the gateway runs as (`docker exec -u hermes …` in the official image), so the files it writes keep the right owner.
+
+### Customizing
+
+- **What gets picked:** `STATE_DIR/interests.md` is free text the skill reads on every run. Describe what you want more of. Name topics and writers to rank up, and kinds of posts (link roundups, podcast notes) to rank down.
+- **Sizes:** the numbers in the Procedure section (chunks of 5 posts per subagent, `per_publication: 20` when collecting) are plain instructions, so edit them directly.
+- **Output format:** the message template targets Discord Markdown. For Telegram, Slack or email, edit the template in the "Send the digest" step and the formatting rules under it.
+- **Schedule and delivery:** use `hermes cron edit <job-id> --schedule "…"` or `--deliver …`.
+
+### Things to know
+
+- **Tool results over about 50,000 characters don't reach the model.** Hermes saves them to a file the model can't parse, and cron runs can't run scripts to help. That's why the skill asks for results in smaller pages. Keep that in mind if you raise the limits.
+- **Reads everything:** the skill reads every new post, which suits a few dozen posts a day. With many more subscriptions, have it shortlist first, the way the Medium digest does.
+- **State:** each run records what it reported in `STATE_DIR/state.json`, so posts never repeat. A run that fails doesn't save state, so the next run covers the same period.
+- **Read-only:** the skill never uses the tools that change your account.
+- **Cost:** a test run made 12 model calls and took about 5 minutes on Claude Sonnet. Cost grows with the number of new posts, because every post is read in full.
+- **Your own account:** this server uses Substack's undocumented web API with your session cookies. A daily digest is light, read-only use, but if Substack objects to automated access, it's your account at risk.
 
 ## Tools
 

@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 
 /** Root directory for everything this tool persists. Override with SUBSTACK_READER_HOME. */
 export function configDir(): string {
@@ -24,3 +24,35 @@ export const paths = {
 export const SESSION_COOKIE = "substack.sid";
 export const USER_AGENT =
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
+
+/**
+ * Directory for the scheduled-digest files (state, run files, interests). The
+ * digest tools are registered only when SUBSTACK_DIGEST_DIR is set, and it must be
+ * an absolute path. Paths never come from tool arguments.
+ */
+export function digestDir(): string | undefined {
+  const dir = process.env.SUBSTACK_DIGEST_DIR?.trim();
+  if (!dir) return undefined;
+  if (!isAbsolute(dir)) {
+    console.error(`substack-reader: SUBSTACK_DIGEST_DIR must be an absolute path (got "${dir}"); digest tools are disabled.`);
+    return undefined;
+  }
+  return dir;
+}
+
+/** IANA time zone for times shown in digests (SUBSTACK_DIGEST_TZ, default UTC). */
+export function digestTimezone(value = process.env.SUBSTACK_DIGEST_TZ): { timeZone: string; warning?: string } {
+  const tz = value?.trim();
+  if (!tz) return { timeZone: "UTC" };
+  if (isValidTimeZone(tz)) return { timeZone: tz };
+  return { timeZone: "UTC", warning: `SUBSTACK_DIGEST_TZ "${tz}" is not a valid IANA time zone; using UTC.` };
+}
+
+export function isValidTimeZone(tz: string): boolean {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}

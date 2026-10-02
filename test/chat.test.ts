@@ -149,3 +149,98 @@ describe("SubstackChat", () => {
     await expect(c.inbox()).rejects.toThrow(/Not logged in/);
   });
 });
+
+describe("SubstackChat.activity", () => {
+  const since = new Date("2026-10-01T12:00:00Z");
+  const inbox = {
+    threads: [
+      // Inbox timestamp is older than the reply that matters: it doesn't move on replies.
+      { type: "chat", id: "chat-77", title: "Nate's Substack", timestamp: "2026-10-01T10:00:00Z", publication: { id: 77, name: "Nate's Substack" } },
+      { type: "chat", id: "chat-88", title: "Quiet Pub", timestamp: "2026-09-30T10:00:00Z", publication: { id: 88, name: "Quiet Pub" } },
+      { type: "chat", id: "chat-99", title: "Dormant", timestamp: "2026-06-01T10:00:00Z", publication: { id: 99, name: "Dormant" } },
+      { type: "direct-message", id: "direct-message-dm1", title: "Carol", timestamp: "2026-10-01T13:00:00Z", messageThread: { id: "dm1" } },
+      { type: "direct-message", id: "direct-message-dm2", title: "Dave", timestamp: "2026-09-01T13:00:00Z", messageThread: { id: "dm2" } },
+    ],
+  };
+  function tp(id: string, created: string, lastReply?: string, comments = 0) {
+    return { communityPost: { id, created_at: created, most_recent_comment_created_at: lastReply, body: `thread ${id}`, comment_count: comments }, user: alice };
+  }
+
+  it("counts threads created or replied to after `since`, DMs by timestamp, and skips dormant chats", async () => {
+    const { chat: c, requests } = chat({
+      [`${B}/messages/inbox?tab=all`]: authed(inbox),
+      [`${B}/community/publications/77/posts`]: authed({
+        threads: [tp("new", "2026-10-01T22:00:42Z", "2026-10-02T00:49:00Z", 3), tp("replied", "2026-09-28T00:00:00Z", "2026-10-01T15:00:00Z", 9), tp("old", "2026-09-27T00:00:00Z", "2026-09-27T05:00:00Z", 1)],
+        moreBefore: true,
+      }),
+      [`${B}/community/publications/88/posts`]: authed({ threads: [tp("q", "2026-09-29T00:00:00Z", "2026-09-30T10:00:00Z")], moreBefore: false }),
+    });
+    const result = await c.activity(since);
+    expect(result.chats).toEqual([
+      {
+        kind: "publication_chat",
+        id: "77",
+        name: "Nate's Substack",
+        lastActivity: "2026-10-01T10:00:00Z",
+        threads: [
+          { id: "new", author: "Alice (@alice)", createdAt: "2026-10-01T22:00:42Z", lastReplyAt: "2026-10-02T00:49:00Z", replies: 3, status: "new_thread" },
+          { id: "replied", author: "Alice (@alice)", createdAt: "2026-09-28T00:00:00Z", lastReplyAt: "2026-10-01T15:00:00Z", replies: 9, status: "new_replies" },
+        ],
+      },
+      { kind: "direct_message", id: "dm1", name: "DM with Carol", lastActivity: "2026-10-01T13:00:00Z", threads: [] },
+    ]);
+    expect(result.errors).toEqual([]);
+    // The oldest thread on page 1 predates `since`, so no second page; the dormant chat isn't fetched.
+    expect(requests.some((r) => r.url.includes("before="))).toBe(false);
+    expect(requests.some((r) => r.url.includes("/publications/99/"))).toBe(false);
+  });
+
+  it("pages while every thread on the page is new, and records chats it couldn't check", async () => {
+    const { chat: c } = chat({
+      [`${B}/messages/inbox?tab=all`]: authed({ threads: inbox.threads.slice(0, 2) }),
+      [`${B}/community/publications/77/posts`]: authed({ threads: [tp("a", "2026-10-02T00:00:00Z")], moreBefore: true }),
+      [`${B}/community/publications/77/posts?before=2026-10-02T00%3A00%3A00Z`]: authed({ threads: [tp("b", "2026-10-01T13:00:00Z"), tp("c", "2026-09-01T00:00:00Z")], moreBefore: true }),
+      [`${B}/community/publications/88/posts`]: { status: 404 },
+    });
+    const result = await c.activity(since);
+    expect(result.chats[0]!.threads.map((t) => t.id)).toEqual(["a", "b"]);
+    expect(result.errors).toEqual([{ id: "88", name: "Quiet Pub", error: expect.stringMatching(/no chat/) }]);
+  });
+
+  it("filters to one chat", async () => {
+    const { chat: c } = chat({ [`${B}/messages/inbox?tab=all`]: authed(inbox) });
+    const result = await c.activity(since, { chatId: "direct-message-dm1" });
+    expect(result.chats.map((x) => x.id)).toEqual(["dm1"]);
+  });
+
+  it("renders transcripts with only the replies after `since`", async () => {
+    const post = { communityPost: { id: "replied", created_at: "2026-09-28T00:00:00Z", body: "Opening post", comment_count: 3 }, user: alice };
+    const r = (id: string, at: string, extra: Record<string, unknown> = {}) => ({ comment: { id, created_at: at, body: `msg ${id}`, ...extra }, user: bob });
+    const { chat: c } = chat({
+      [`${B}/messages/inbox?tab=all`]: authed({ threads: [inbox.threads[0], inbox.threads[3]] }),
+      [`${B}/community/publications/77/posts`]: authed({ threads: [tp("replied", "2026-09-28T00:00:00Z", "2026-10-01T15:00:00Z", 3)], moreBefore: false }),
+      [`${B}/community/posts/replied/comments?order=asc&initial=true`]: authed({
+        post,
+        replies: [r("old1", "2026-09-28T01:00:00Z"), r("old2", "2026-09-29T01:00:00Z", { reply_count: 1 }), r("new1", "2026-10-01T15:00:00Z")],
+      }),
+      [`${B}/community/comments/old2/comments?order=asc&initial=true`]: authed({ replies: [r("sub-new", "2026-10-01T14:00:00Z")] }),
+      [`${B}/messages/dm/dm1`]: authed({ profile: { name: "Carol" }, replies: [r("m-old", "2026-09-30T00:00:00Z"), r("m-new", "2026-10-01T13:00:00Z")] }),
+    });
+    const { text } = await c.activityTranscript(since);
+    expect(text).toContain("# Nate's Substack (publication chat 77)");
+    expect(text).toContain("Opening post");
+    expect(text).toContain("_(1 earlier replies)_");
+    expect(text).not.toContain("msg old1");
+    expect(text).toContain("msg old2"); // kept as context for its newer sub-reply
+    expect(text).toContain("  - **Bob (@bob)** (2026-10-01T14:00:00Z): msg sub-new");
+    expect(text).toContain("msg new1");
+    expect(text).toContain("# DM with Carol");
+    expect(text).toContain("_(1 earlier messages)_");
+    expect(text).not.toContain("msg m-old");
+    expect(text).toContain("msg m-new");
+
+    const short = await c.activityTranscript(since, { maxChars: 300 });
+    expect(short.text.length).toBeLessThanOrEqual(300);
+    expect(short.text).toMatch(/Truncated at 300 characters/);
+  });
+});

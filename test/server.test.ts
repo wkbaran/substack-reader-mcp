@@ -58,6 +58,7 @@ describe("MCP server", () => {
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([
       "auth_status",
+      "get_chat_activity",
       "get_chat_threads",
       "get_feed",
       "get_recent_posts",

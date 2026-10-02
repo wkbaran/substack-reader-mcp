@@ -5,8 +5,10 @@ import { z } from "zod";
 import { loadCredentials, type Credentials } from "./auth/credentials.js";
 import { renderPost } from "./format.js";
 import { SubstackClient } from "./substack/api.js";
-import { renderMessages, renderThread, SubstackChat } from "./substack/chat.js";
+import { renderChatActivity, renderMessages, renderThread, SubstackChat } from "./substack/chat.js";
 import { AuthError, SubstackHttp, type FetchLike } from "./substack/http.js";
+import { digestTimezone } from "./config.js";
+import { formatLocal, isoSeconds, parseSince } from "./time.js";
 
 const VERSION = "0.2.0";
 
@@ -33,7 +35,17 @@ export class ClientProvider {
 
 const readOnly = { readOnlyHint: true, openWorldHint: true } as const;
 
-export function createServer(provider = new ClientProvider()): McpServer {
+export interface ServerOptions {
+  /** Enables the digest tools. Defaults to SUBSTACK_DIGEST_DIR. */
+  digestDir?: string;
+  /** IANA time zone for digest times. Defaults to SUBSTACK_DIGEST_TZ, then UTC. */
+  timezone?: string;
+  /** Injected for tests. */
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+export function createServer(provider = new ClientProvider(), opts: ServerOptions = {}): McpServer {
   const server = new McpServer(
     { name: "substack-reader", version: VERSION },
     {
@@ -265,6 +277,35 @@ export function createServer(provider = new ClientProvider()): McpServer {
   );
 
   server.registerTool(
+    "get_chat_activity",
+    {
+      title: "Get chat activity",
+      description:
+        "Publication chats and DMs with activity since a point in time: threads created or replied to after `since`, and DMs with new messages. " +
+        "With `transcripts: true`, returns each active thread's opening post plus only the replies after `since`, and each DM's new messages. " +
+        "More reliable than list_chats' unread flags, which Substack doesn't keep up to date.",
+      inputSchema: {
+        since: z.string().min(1).describe('ISO time ("2026-10-01T12:00:00Z") or relative ("24h", "7d").'),
+        chat_id: z.string().optional().describe("Only this chat: a publication id or DM id from list_chats."),
+        transcripts: z.boolean().default(false).describe("Include the new messages, not just the list."),
+        max_chars: z.number().int().min(2000).max(45_000).default(40_000),
+      },
+      annotations: readOnly,
+    },
+    ({ since, chat_id, transcripts, max_chars }) =>
+      run(async () => {
+        const client = await provider.get();
+        const when = parseSince(since)!;
+        const chat = new SubstackChat(client);
+        const tz = opts.timezone ?? digestTimezone().timeZone;
+        if (!transcripts) return text(renderChatActivity(await chat.activity(when, { chatId: chat_id }), (iso) => `${isoSeconds(new Date(iso))} (${formatLocal(iso, tz)})`));
+        const result = await chat.activityTranscript(when, { chatId: chat_id, maxChars: max_chars });
+        if (result.activity.chats.length === 0) return text(renderChatActivity(result.activity, (iso) => isoSeconds(new Date(iso))));
+        return text(result.text);
+      }),
+  );
+
+  server.registerTool(
     "subscribe",
     {
       title: "Subscribe (free)",
@@ -330,14 +371,4 @@ function json(value: unknown): CallToolResult {
   return text(JSON.stringify(value, null, 2));
 }
 
-export function parseSince(since: string | undefined, now = Date.now()): Date | undefined {
-  if (!since) return undefined;
-  const rel = since.trim().match(/^(\d+)\s*([hdw])$/i);
-  if (rel) {
-    const unit = { h: 3_600_000, d: 86_400_000, w: 604_800_000 }[rel[2]!.toLowerCase() as "h" | "d" | "w"];
-    return new Date(now - Number(rel[1]) * unit);
-  }
-  const t = Date.parse(since);
-  if (Number.isNaN(t)) throw new Error(`Couldn't understand since="${since}". Use an ISO date or e.g. "7d".`);
-  return new Date(t);
-}
+export { parseSince };

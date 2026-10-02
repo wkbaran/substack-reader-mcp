@@ -7,10 +7,12 @@ import { renderPost } from "./format.js";
 import { SubstackClient } from "./substack/api.js";
 import { renderChatActivity, renderMessages, renderThread, SubstackChat } from "./substack/chat.js";
 import { AuthError, SubstackHttp, type FetchLike } from "./substack/http.js";
-import { digestTimezone } from "./config.js";
+import { digestDir as envDigestDir, digestTimezone } from "./config.js";
+import { digestBegin } from "./digest/collect.js";
+import { digestFinish, digestStatus, markReported } from "./digest/finish.js";
 import { formatLocal, isoSeconds, parseSince } from "./time.js";
 
-const VERSION = "0.2.0";
+const VERSION = "0.3.0";
 
 /**
  * Hands out a client for the current credentials. Credentials are re-read on
@@ -21,13 +23,16 @@ export class ClientProvider {
   private current: { sid: string | undefined; client: SubstackClient } | null = null;
   creds: Credentials | null = null;
 
-  constructor(private readonly fetchImpl?: FetchLike) {}
+  constructor(
+    private readonly fetchImpl?: FetchLike,
+    private readonly httpOpts: { sleep?: (ms: number) => Promise<void>; random?: () => number } = {},
+  ) {}
 
   async get(): Promise<SubstackClient> {
     this.creds = await loadCredentials();
     const sid = this.creds?.sid;
     if (!this.current || this.current.sid !== sid) {
-      this.current = { sid, client: new SubstackClient(new SubstackHttp({ sid, fetch: this.fetchImpl })) };
+      this.current = { sid, client: new SubstackClient(new SubstackHttp({ sid, fetch: this.fetchImpl, ...this.httpOpts })) };
     }
     return this.current.client;
   }
@@ -46,6 +51,8 @@ export interface ServerOptions {
 }
 
 export function createServer(provider = new ClientProvider(), opts: ServerOptions = {}): McpServer {
+  const dir = opts.digestDir ?? envDigestDir();
+  const tzConfig = digestTimezone(opts.timezone);
   const server = new McpServer(
     { name: "substack-reader", version: VERSION },
     {
@@ -53,7 +60,12 @@ export function createServer(provider = new ClientProvider(), opts: ServerOption
         "Read the user's Substack subscriptions. Start with list_subscriptions or get_feed; " +
         "subscribe/unsubscribe change the user's account (free subscriptions only) and should only be used when asked. " +
         "publications can be referred to by name, subdomain, or URL. If a tool reports an auth " +
-        "problem, tell the user to run `substack-reader-mcp login` in a terminal — do not retry in a loop.",
+        "problem, tell the user to run `substack-reader-mcp login` in a terminal — do not retry in a loop." +
+        (dir
+          ? " For the scheduled digest: call digest_begin once, read the posts and chats it lists, then call digest_finish once with " +
+            "a judgment for every post and chat, and reply with exactly the text after its ===== DIGEST line. " +
+            "Never read or edit the digest's state files directly; digest_status and mark_reported are for debugging and repair."
+          : ""),
     },
   );
 
@@ -297,7 +309,7 @@ export function createServer(provider = new ClientProvider(), opts: ServerOption
         const client = await provider.get();
         const when = parseSince(since)!;
         const chat = new SubstackChat(client);
-        const tz = opts.timezone ?? digestTimezone().timeZone;
+        const tz = tzConfig.timeZone;
         if (!transcripts) return text(renderChatActivity(await chat.activity(when, { chatId: chat_id }), (iso) => `${isoSeconds(new Date(iso))} (${formatLocal(iso, tz)})`));
         const result = await chat.activityTranscript(when, { chatId: chat_id, maxChars: max_chars });
         if (result.activity.chats.length === 0) return text(renderChatActivity(result.activity, (iso) => isoSeconds(new Date(iso))));
@@ -341,7 +353,118 @@ export function createServer(provider = new ClientProvider(), opts: ServerOption
       }),
   );
 
+  if (dir) registerDigestTools(server, provider, dir, tzConfig, opts);
+
   return server;
+}
+
+function registerDigestTools(server: McpServer, provider: ClientProvider, dir: string, tz: { timeZone: string; warning?: string }, opts: ServerOptions): void {
+  const lenientBool = z.union([z.boolean(), z.string()]).optional();
+
+  server.registerTool(
+    "digest_begin",
+    {
+      title: "Begin a digest run",
+      description:
+        "Start a digest run: fetch every post published since the last digest (minus ones already reported), the chats with new activity, and the user's interests, " +
+        "and save the work list for digest_finish. Returns plain text with a RUN_ID, one line per post (ref P1, P2, …) and per chat, and what to do next. " +
+        "Doesn't change the digest state; only digest_finish does.",
+      inputSchema: {
+        max_posts: z.number().int().min(1).max(200).default(100).describe("At most this many posts (newest first); the rest carry over to the next run."),
+        include_chats: z.boolean().default(true),
+        first_run_lookback: z.string().default("48h").describe('How far back to look when there is no saved state yet ("48h", "7d").'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    },
+    ({ max_posts, include_chats, first_run_lookback }) =>
+      run(async () => {
+        const client = await provider.get();
+        const { text: out } = await digestBegin(
+          { dir, client, timezone: tz.timeZone, configWarnings: tz.warning ? [tz.warning] : [], now: opts.now, sleep: opts.sleep },
+          { maxPosts: max_posts, includeChats: include_chats, firstRunLookback: first_run_lookback },
+        );
+        return text(out);
+      }),
+  );
+
+  server.registerTool(
+    "digest_finish",
+    {
+      title: "Finish a digest run",
+      description:
+        "Finish the run from digest_begin: give one entry per post (ref like \"P3\", or its URL) and one per chat (its id). " +
+        "The server checks the entries against the run, lays out the final message, and saves state (every listed post counts as reported). " +
+        "Returns status lines, then a line starting \"===== DIGEST\", then the message: reply with exactly that message, or exactly [SILENT] when that's the message. " +
+        "Calling it again with the same run_id repeats the result without saving twice.",
+      inputSchema: {
+        run_id: z.string().min(1).describe("RUN_ID from digest_begin."),
+        posts: z
+          .array(
+            z.object({
+              ref: z.string().optional().describe('Post ref from digest_begin, e.g. "P3".'),
+              url: z.string().optional().describe("The post URL, if you don't have the ref."),
+              section: z.string().describe('"pick" (read in full), "other" (everything else), or "unreadable" (read_post failed).'),
+              gist: z.string().optional().describe("1–2 sentences: the actual argument or findings."),
+              why: z.string().optional().describe("For picks: one sentence on why it's worth reading in full."),
+              preview_only: lenientBool.describe("true when read_post returned only a preview."),
+              error: z.string().optional().describe("For unreadable posts: the error."),
+            }),
+          )
+          .default([])
+          .describe("Picks in the order they should appear; other entries in any order."),
+        chats: z
+          .array(
+            z.object({
+              id: z.string().describe("Chat id from digest_begin."),
+              topics: z.string().optional().describe("1–3 sentences on what's being discussed."),
+              for_user: z.string().optional().describe('Any question or mention directed at the user, else "none".'),
+            }),
+          )
+          .default([]),
+        render: z.boolean().default(true).describe("false: plain-text sections instead of the Discord message."),
+        dry_run: z.boolean().default(false).describe("Show the result without saving anything."),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    ({ run_id, posts, chats, render, dry_run }) =>
+      run(async () => {
+        const result = await digestFinish(
+          dir,
+          { runId: run_id, posts, chats, render, dryRun: dry_run },
+          { now: opts.now },
+        );
+        return { content: [{ type: "text", text: result.text }], ...(result.isError ? { isError: true } : {}) };
+      }),
+  );
+
+  server.registerTool(
+    "digest_status",
+    {
+      title: "Digest status",
+      description: "Read-only: the digest's last run, number of reported posts, publications waiting to be re-checked, and the current and recent runs. For debugging.",
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    () => run(async () => text(await digestStatus(dir, tz.timeZone))),
+  );
+
+  server.registerTool(
+    "mark_reported",
+    {
+      title: "Mark posts as reported",
+      description:
+        "Manual repair of the digest state: add post URLs to the reported list so future digests skip them, and optionally set last_run. Idempotent. Not part of a normal digest run.",
+      inputSchema: {
+        urls: z.array(z.string()).default([]).describe("Post URLs."),
+        last_run: z.string().optional().describe("Set last_run to this ISO time."),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    ({ urls, last_run }) =>
+      run(async () => {
+        const result = await markReported(dir, { urls, lastRun: last_run }, { now: opts.now });
+        return { content: [{ type: "text", text: result.text }], ...(result.isError ? { isError: true } : {}) };
+      }),
+  );
 }
 
 export async function serve(): Promise<void> {

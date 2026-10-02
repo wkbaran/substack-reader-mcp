@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeSubscriptions, postEndpoint, SubstackClient } from "../src/substack/api.js";
+import { normalizePostUrl, normalizeSubscriptions, postEndpoint, SubstackClient } from "../src/substack/api.js";
 import { renderPost } from "../src/format.js";
 import { parseSince } from "../src/server.js";
 import { SubstackHttp } from "../src/substack/http.js";
@@ -101,7 +101,7 @@ describe("SubstackClient", () => {
     const feed = await c.feed({ perPublication: 2 });
     expect(feed.posts.map((p) => p.id)).toEqual([21, 11, 12]);
     expect(feed.posts[2]).toMatchObject({ paywalled: true, publication: "The Pragmatic Engineer" });
-    expect(feed.failed).toEqual([{ publication: "Broken", error: expect.stringMatching(/Not found/) }]);
+    expect(feed.failed).toEqual([{ publication: "Broken", error: expect.stringMatching(/Not found/), retryable: false }]);
     expect(feed.publications).toBe(3);
   });
 
@@ -201,5 +201,87 @@ describe("parseSince", () => {
     expect(parseSince("2026-09-01", now)?.toISOString()).toBe("2026-09-01T00:00:00.000Z");
     expect(parseSince(undefined)).toBeUndefined();
     expect(() => parseSince("last tuesday")).toThrow();
+  });
+});
+
+describe("postsSince and the feed retry pass", () => {
+  const PROFILE = {
+    id: 42,
+    subscriptions: [
+      { membership_state: "free_signup", publication: { id: 1, name: "Alpha", subdomain: "alpha" } },
+      { membership_state: "free_signup", publication: { id: 2, name: "Beta", subdomain: "beta" } },
+    ],
+  };
+  const archive = (sub: string, offset: number, limit: number) => `https://${sub}.substack.com/api/v1/archive?sort=new&offset=${offset}&limit=${limit}`;
+
+  function setup(routes: Parameters<typeof fakeFetch>[0]) {
+    const { fetch, requests } = fakeFetch({ "https://substack.com/api/v1/user/profile/self": authed(PROFILE), ...routes });
+    const sleeps: number[] = [];
+    const sleep = async (ms: number) => void sleeps.push(ms);
+    return { c: new SubstackClient(new SubstackHttp({ sid: SID, fetch, sleep: async () => {} })), requests, sleeps, sleep };
+  }
+
+  it("marks failures retryable and recovers them in the retry pass", async () => {
+    let betaCalls = 0;
+    const { c, sleeps, sleep } = setup({
+      [archive("alpha", 0, 3)]: { body: [post(1, "2026-09-20T00:00:00Z")] },
+      [archive("beta", 0, 3)]: () => (++betaCalls <= 4 ? { status: 429 } : { body: [post(2, "2026-09-21T00:00:00Z")] }),
+    });
+    const feed = await c.feed({ sleep });
+    expect(betaCalls).toBe(5);
+    expect(sleeps).toEqual([15000, 1000]);
+    expect(feed.failed).toEqual([]);
+    expect(feed.posts.map((p) => p.id)).toEqual([2, 1]);
+  });
+
+  it("reports a persistent 429 as retryable after both passes", async () => {
+    const { c, sleeps, sleep } = setup({
+      [archive("alpha", 0, 3)]: { body: [] },
+      [archive("beta", 0, 3)]: { status: 429 },
+    });
+    const feed = await c.feed({ sleep });
+    expect(sleeps).toEqual([15000, 1000, 30000, 1000]);
+    expect(feed.failed).toEqual([{ publication: "Beta", error: expect.stringMatching(/HTTP 429/), retryable: true }]);
+  });
+
+  it("pages back while a page is full and new, using each publication's own cutoff", async () => {
+    const full = Array.from({ length: 2 }, (_, i) => post(100 + i, `2026-09-2${5 - i}T00:00:00Z`));
+    const { c, requests } = setup({
+      [archive("alpha", 0, 2)]: { body: full },
+      [archive("alpha", 2, 2)]: { body: [post(102, "2026-09-23T00:00:00Z"), post(103, "2026-09-10T00:00:00Z")] },
+      [archive("beta", 0, 2)]: { body: [post(200, "2026-09-25T00:00:00Z"), post(201, "2026-09-24T00:00:00Z")] },
+    });
+    const subs = await c.subscriptions();
+    const since: Record<string, Date> = { Alpha: new Date("2026-09-20T00:00:00Z"), Beta: new Date("2026-09-24T12:00:00Z") };
+    const results = await c.postsSince(subs, (s) => since[s.name], { pageSize: 2, sleep: async () => {} });
+    expect(results.map((r) => [r.sub.name, r.status, r.posts.map((p) => p.id)])).toEqual([
+      ["Alpha", "ok", [100, 101, 102]],
+      ["Beta", "ok", [200]],
+    ]);
+    expect(requests.filter((r) => r.url.includes("beta.substack.com"))).toHaveLength(1);
+  });
+
+  it("stops at the time budget and reports the rest as not checked", async () => {
+    let clock = 0;
+    const { c } = setup({
+      [archive("alpha", 0, 20)]: () => ((clock += 200_000), { body: [] }),
+      [archive("beta", 0, 20)]: { body: [] },
+    });
+    const subs = await c.subscriptions();
+    const results = await c.postsSince(subs, () => undefined, { concurrency: 1, budgetMs: 100_000, now: () => clock, sleep: async () => {} });
+    expect(results.map((r) => [r.status, r.error ?? null, r.retryable ?? null])).toEqual([
+      ["ok", null, null],
+      ["failed", "not checked (out of time)", true],
+    ]);
+  });
+});
+
+describe("normalizePostUrl", () => {
+  it.each([
+    ["https://Example.Substack.com/p/Slug/", "https://example.substack.com/p/Slug"],
+    ["https://example.substack.com/p/slug?utm_source=x#footnote", "https://example.substack.com/p/slug"],
+    ["  https://example.substack.com/p/slug  ", "https://example.substack.com/p/slug"],
+  ])("%s", (input, expected) => {
+    expect(normalizePostUrl(input)).toBe(expected);
   });
 });

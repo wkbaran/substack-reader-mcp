@@ -98,7 +98,8 @@ export function createServer(provider = new ClientProvider()): McpServer {
     "get_feed",
     {
       title: "Get subscription feed",
-      description: "Recent posts across all subscriptions, newest first.",
+      description:
+        "Recent posts across all subscriptions, newest first. Publications listed under `failed` were not checked, so their new posts are missing from this result; `retryable: true` means a rate limit or temporary error, worth trying again later.",
       inputSchema: {
         limit: z.number().int().min(1).max(200).default(25).describe("Total posts to return."),
         per_publication: z.number().int().min(1).max(20).default(3).describe("Posts to look at per publication."),

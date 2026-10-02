@@ -1,4 +1,4 @@
-import { AuthError, SubstackError, SubstackHttp } from "./http.js";
+import { AuthError, isRetryableStatus, SubstackError, SubstackHttp } from "./http.js";
 import type { SubstackUser } from "../auth/credentials.js";
 
 // ---- Raw Substack shapes (only the fields we use; everything else is ignored) ----
@@ -170,33 +170,97 @@ export class SubstackClient {
     return raw.map((p) => summarize(p, name));
   }
 
+  /** One page of a publication's archive, newest first. */
+  async archivePage(sub: Subscription, offset: number, limit: number): Promise<PostSummary[]> {
+    const raw = await this.http.getJson<RawPost[]>(
+      `${sub.url}/api/v1/archive?sort=new&offset=${Math.max(0, offset)}&limit=${clamp(limit, 1, MAX_PAGE)}`,
+    );
+    return raw.map((p) => summarize(p, sub.name));
+  }
+
+  /**
+   * Posts newer than a per-publication cutoff, for each publication. Pages back
+   * through the archive while a page is full and entirely newer than the cutoff.
+   * Publications that fail with a rate limit, a server error, or a network error
+   * get two more tries after a pause, one at a time; others are reported as failed.
+   * Never throws for a single publication.
+   */
+  async postsSince(subs: Subscription[], sinceFor: (sub: Subscription) => Date | undefined, opts: PostsSinceOptions = {}): Promise<PublicationPosts[]> {
+    const pageSize = clamp(opts.pageSize ?? 20, 1, MAX_PAGE);
+    const maxPages = Math.max(1, opts.maxPages ?? 5);
+    const retryDelays = opts.retryDelays ?? [15_000, 30_000];
+    const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+    const now = opts.now ?? Date.now;
+    const deadline = now() + (opts.budgetMs ?? 140_000);
+
+    const fetchOne = async (sub: Subscription): Promise<PublicationPosts> => {
+      const since = sinceFor(sub);
+      const cutoff = since?.getTime() ?? -Infinity;
+      const posts: PostSummary[] = [];
+      let more = false;
+      try {
+        for (let page = 0; page < maxPages; page++) {
+          const batch = await this.archivePage(sub, page * pageSize, pageSize);
+          posts.push(...batch.filter((p) => timeOf(p.date) >= cutoff));
+          const full = batch.length === pageSize;
+          const allNew = batch.every((p) => timeOf(p.date) >= cutoff);
+          more = full && allNew && since !== undefined;
+          if (!more) break;
+        }
+        // `more` is still true only when the page limit stopped the paging.
+        return { sub, since, status: "ok", posts, truncated: more || undefined };
+      } catch (err) {
+        if (err instanceof AuthError && err.reason === "missing") throw err;
+        const status = err instanceof SubstackError ? err.status : undefined;
+        // status undefined = network error or timeout, also worth another try.
+        const retryable = err instanceof AuthError ? false : status === undefined || isRetryableStatus(status);
+        const detail = err instanceof Error ? err.message : String(err);
+        return { sub, since, status: "failed", posts: [], error: shortError(err), detail, retryable };
+      }
+    };
+    const outOfTime = (sub: Subscription): PublicationPosts => ({
+      sub,
+      since: sinceFor(sub),
+      status: "failed",
+      posts: [],
+      error: "not checked (out of time)",
+      retryable: true,
+    });
+
+    const results = await mapLimit(subs, opts.concurrency ?? 3, async (sub) => (now() < deadline ? fetchOne(sub) : outOfTime(sub)));
+
+    // Retry passes: wait, then go one publication at a time so the rate limit can recover.
+    for (const delay of retryDelays) {
+      const pending = results.map((r, i) => [r, i] as const).filter(([r]) => r.status === "failed" && r.retryable);
+      if (pending.length === 0 || now() + delay >= deadline) break;
+      await sleep(delay);
+      for (const [r, i] of pending) {
+        if (now() >= deadline) break;
+        results[i] = await fetchOne(r.sub);
+        await sleep(1_000);
+      }
+    }
+    return results;
+  }
+
   /**
    * Recent posts across all subscriptions, newest first. Publications are fetched
    * concurrently; ones that fail are reported instead of aborting the whole feed.
    */
-  async feed({ limit = 25, perPublication = 3, since, concurrency = 6 }: { limit?: number; perPublication?: number; since?: Date; concurrency?: number } = {}): Promise<{ posts: PostSummary[]; failed: Array<{ publication: string; error: string }>; publications: number }> {
+  async feed({ limit = 25, perPublication = 3, since, concurrency = 3, sleep, retryDelays }: { limit?: number; perPublication?: number; since?: Date; concurrency?: number; sleep?: (ms: number) => Promise<void>; retryDelays?: number[] } = {}): Promise<{ posts: PostSummary[]; failed: Array<{ publication: string; error: string; retryable: boolean }>; publications: number }> {
     const subs = await this.subscriptions();
-    const failed: Array<{ publication: string; error: string }> = [];
-    const perPub = clamp(perPublication, 1, 20);
-
-    const results = await mapLimit(subs, concurrency, async (sub) => {
-      try {
-        const raw = await this.http.getJson<RawPost[]>(
-          `${sub.url}/api/v1/archive?sort=new&offset=0&limit=${perPub}`,
-        );
-        return raw.map((p) => summarize(p, sub.name));
-      } catch (err) {
-        // The account session was already validated by subscriptions(); an auth
-        // failure here is specific to this publication, so don't sink the feed.
-        failed.push({ publication: sub.name, error: err instanceof Error ? err.message : String(err) });
-        return [];
-      }
+    const results = await this.postsSince(subs, () => since, {
+      pageSize: clamp(perPublication, 1, 20),
+      maxPages: 1,
+      concurrency,
+      sleep,
+      retryDelays,
     });
-
-    const cutoff = since?.getTime() ?? -Infinity;
+    const failed = results
+      .filter((r) => r.status === "failed")
+      .map((r) => ({ publication: r.sub.name, error: r.detail ?? r.error ?? "unknown error", retryable: Boolean(r.retryable) }));
     const posts = results
-      .flat()
-      .filter((p) => timeOf(p.date) >= cutoff)
+      .flatMap((r) => r.posts)
       .sort((a, b) => timeOf(b.date) - timeOf(a.date))
       .slice(0, clamp(limit, 1, 200));
     return { posts, failed, publications: subs.length };
@@ -332,7 +396,62 @@ export class SubstackClient {
   }
 }
 
+export interface PostsSinceOptions {
+  /** Posts per archive request (default 20). */
+  pageSize?: number;
+  /** Most archive pages per publication (default 5). */
+  maxPages?: number;
+  /** Publications fetched at once in the first pass (default 3). */
+  concurrency?: number;
+  /** Pauses before each retry pass (default 15 s, then 30 s). */
+  retryDelays?: number[];
+  /** Total time allowed; publications not reached in time are reported as failed (default 140 s). */
+  budgetMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
+}
+
+export interface PublicationPosts {
+  sub: Subscription;
+  /** The cutoff used for this publication. */
+  since?: Date;
+  status: "ok" | "failed";
+  /** Posts at or after the cutoff, newest first. */
+  posts: PostSummary[];
+  /** Short form, e.g. "HTTP 429". */
+  error?: string;
+  /** The full error message. */
+  detail?: string;
+  /** Rate limit, server error, or network problem: worth trying again later. */
+  retryable?: boolean;
+  /** Stopped at the page limit while every post was still new. */
+  truncated?: boolean;
+}
+
 // ---- helpers ----
+
+/** Short form of an error for listings: "HTTP 429" rather than the whole URL. */
+function shortError(err: unknown): string {
+  if (err instanceof AuthError) return "not authorized";
+  if (err instanceof SubstackError && err.status === 404) return "not found (HTTP 404)";
+  if (err instanceof SubstackError && err.status !== undefined) return `HTTP ${err.status}`;
+  const msg = err instanceof Error ? err.message : String(err);
+  return /timeout|aborted/i.test(msg) ? "timed out" : msg.replace(/^Request to \S+ failed: /, "network error: ").slice(0, 120);
+}
+
+/**
+ * A post URL reduced to a comparison key: lowercase scheme and host, no query,
+ * fragment or trailing slash. The path keeps its case.
+ */
+export function normalizePostUrl(url: string): string {
+  try {
+    const u = new URL(url.trim());
+    const path = u.pathname.replace(/\/+$/, "");
+    return `${u.protocol}//${u.host.toLowerCase()}${path}`;
+  } catch {
+    return url.trim().replace(/[?#].*$/, "").replace(/\/+$/, "");
+  }
+}
 
 export function normalizeSubscriptions(subs: RawSubscription[], pubs: RawPublication[]): Subscription[] {
   const byId = new Map(pubs.map((p) => [p.id, p]));

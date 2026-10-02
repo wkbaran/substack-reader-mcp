@@ -34,9 +34,14 @@ export interface HttpOptions {
   sid?: string;
   fetch?: FetchLike;
   timeoutMs?: number;
+  /** Retries after a network error or a 5xx (GET only). */
   maxRetries?: number;
+  /** Retries after a 429. Substack's rate limit needs longer waits than other errors. */
+  maxRetries429?: number;
   /** Injected so tests don't actually wait on backoff. */
   sleep?: (ms: number) => Promise<void>;
+  /** Injected so tests get a predictable jitter. Returns a number in [0, 1). */
+  random?: () => number;
 }
 
 const MAX_REDIRECTS = 5;
@@ -68,12 +73,16 @@ export class SubstackHttp {
   private readonly fetchImpl: FetchLike;
   private readonly timeoutMs: number;
   private readonly maxRetries: number;
+  private readonly maxRetries429: number;
   private readonly sleep: (ms: number) => Promise<void>;
+  private readonly random: () => number;
 
   constructor(private readonly opts: HttpOptions = {}) {
     this.fetchImpl = opts.fetch ?? fetch;
     this.timeoutMs = opts.timeoutMs ?? 20_000;
     this.maxRetries = opts.maxRetries ?? 2;
+    this.maxRetries429 = opts.maxRetries429 ?? 3;
+    this.random = opts.random ?? Math.random;
     this.sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   }
 
@@ -135,23 +144,33 @@ export class SubstackHttp {
 
   private async request(url: string, opts: RequestOptions, accept = "application/json"): Promise<Response> {
     const method = opts.method ?? "GET";
-    for (let attempt = 0; ; attempt++) {
+    // 429s and other failures are counted separately: each has its own schedule.
+    let retries = 0;
+    let retries429 = 0;
+    for (;;) {
       let res: Response;
       try {
         res = await this.followRedirects(url, method, opts.body, accept);
       } catch (err) {
         // Only GETs are retried after network errors: a POST may have gone through.
-        if (method === "GET" && attempt < this.maxRetries && isTransient(err)) {
-          await this.sleep(backoff(attempt));
+        if (method === "GET" && retries < this.maxRetries && isTransient(err)) {
+          await this.sleep(backoff(retries++));
           continue;
         }
         const msg = err instanceof Error ? err.message : String(err);
         throw new SubstackError(`Request to ${url} failed: ${msg}`, undefined, url);
       }
-      const retryable = res.status === 429 || (method === "GET" && res.status >= 500);
-      if (retryable && attempt < this.maxRetries) {
+      if (res.status === 429 && retries429 < this.maxRetries429) {
+        // At 6 concurrent requests Substack answered 429 to a fifth of the feed, and
+        // sub-second backoff wasn't enough to recover. Without Retry-After, wait 2 s,
+        // 5 s, then 10 s, with jitter so parallel requests don't retry in lockstep.
         await res.body?.cancel();
-        await this.sleep(retryAfterMs(res) ?? backoff(attempt));
+        await this.sleep(retryAfterMs(res) ?? backoff429(retries429++, this.random));
+        continue;
+      }
+      if (method === "GET" && res.status >= 500 && retries < this.maxRetries) {
+        await res.body?.cancel();
+        await this.sleep(retryAfterMs(res) ?? backoff(retries++));
         continue;
       }
       return res;
@@ -248,6 +267,19 @@ function isTransient(err: unknown): boolean {
 
 function backoff(attempt: number): number {
   return 500 * 2 ** attempt;
+}
+
+const BACKOFF_429_MS = [2_000, 5_000, 10_000];
+
+/** Wait before retry number `attempt + 1` after a 429 without Retry-After: base plus up to 30% jitter. */
+export function backoff429(attempt: number, random: () => number = Math.random): number {
+  const base = BACKOFF_429_MS[Math.min(attempt, BACKOFF_429_MS.length - 1)]!;
+  return Math.round(base * (1 + 0.3 * random()));
+}
+
+/** Statuses worth trying again later: rate limiting and server errors. */
+export function isRetryableStatus(status: number | undefined): boolean {
+  return status === 429 || (status !== undefined && status >= 500);
 }
 
 function retryAfterMs(res: Response): number | null {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AuthError, SubstackError, SubstackHttp } from "../src/substack/http.js";
+import { AuthError, backoff429, isRetryableStatus, SubstackError, SubstackHttp } from "../src/substack/http.js";
 import { fakeFetch, SID } from "./helpers.js";
 
 const noSleep = async () => {};
@@ -144,5 +144,48 @@ describe("SubstackHttp errors", () => {
     const err = await rejection(http.getJson("https://substack.com/x"));
     expect(err).toBeInstanceOf(SubstackError);
     expect(err.message).toMatch(/HTTP 400.*Bad thing/);
+  });
+});
+
+describe("SubstackHttp 429 backoff", () => {
+  it("waits 2 s, 5 s, then 10 s without Retry-After, then gives up", async () => {
+    let n = 0;
+    const { fetch } = fakeFetch({ "https://substack.com/x": () => (n++, { status: 429 }) });
+    const waits: number[] = [];
+    const http = new SubstackHttp({ fetch, sleep: async (ms) => void waits.push(ms), random: () => 0 });
+    const err = await rejection(http.getJson("https://substack.com/x"));
+    expect(err).toBeInstanceOf(SubstackError);
+    expect(err.status).toBe(429);
+    expect(waits).toEqual([2000, 5000, 10000]);
+    expect(n).toBe(4);
+  });
+
+  it("adds up to 30% jitter", () => {
+    expect(backoff429(0, () => 0.999)).toBe(2599);
+    expect(backoff429(2, () => 0.5)).toBe(11500);
+    expect(backoff429(7, () => 0)).toBe(10000);
+  });
+
+  it("honors Retry-After, capped at 30 s", async () => {
+    let n = 0;
+    const { fetch } = fakeFetch({
+      "https://substack.com/x": () => (++n === 1 ? { status: 429, headers: { "retry-after": "120" } } : { body: { ok: true } }),
+    });
+    const waits: number[] = [];
+    const http = new SubstackHttp({ fetch, sleep: async (ms) => void waits.push(ms) });
+    expect(await http.getJson("https://substack.com/x")).toEqual({ ok: true });
+    expect(waits).toEqual([30000]);
+  });
+
+  it("keeps the short schedule for 5xx", async () => {
+    const { fetch } = fakeFetch({ "https://substack.com/x": { status: 502 } });
+    const waits: number[] = [];
+    const http = new SubstackHttp({ fetch, sleep: async (ms) => void waits.push(ms) });
+    await expect(http.getJson("https://substack.com/x")).rejects.toThrow(/HTTP 502/);
+    expect(waits).toEqual([500, 1000]);
+  });
+
+  it("classifies retryable statuses", () => {
+    expect([429, 500, 503, 404, 401, 400, undefined].map(isRetryableStatus)).toEqual([true, true, true, false, false, false, false]);
   });
 });

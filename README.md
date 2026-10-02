@@ -9,7 +9,7 @@ An MCP server that gives Claude (and any other MCP client) access to your Substa
 ![Node 20+](https://img.shields.io/badge/node-20%2B-339933?logo=nodedotjs&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)
 ![MCP](https://img.shields.io/badge/MCP-stdio-6E56CF)
-![Tools](https://img.shields.io/badge/tools-12-informational)
+![Tools](https://img.shields.io/badge/tools-13-informational)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 
 [Quick start](#quick-start) · [Other clients](#other-mcp-clients) · [Hermes digest](#daily-digest-with-hermes-agent) · [Tools](#tools) · [Logging in](#logging-in) · [Privacy and security](#privacy-and-security) · [Troubleshooting](#troubleshooting)
@@ -125,7 +125,9 @@ claude mcp add --scope user substack-reader -- node /absolute/path/to/substack-r
 
 ## Daily digest with Hermes Agent
 
-[`hermes/`](hermes/) contains a skill for [Hermes Agent](https://github.com/NousResearch/hermes-agent) that turns this server into a scheduled Substack digest. Each morning it collects every post published since the last run in your subscriptions, plus unread chats and DMs. Subagents read every post in full, and it sends one message: the posts worth reading in full (with a two-line summary and why), everything else grouped by publication, and a summary of your chats that puts anything addressed to you first.
+[`hermes/`](hermes/) contains a skill for [Hermes Agent](https://github.com/NousResearch/hermes-agent) that turns this server into a scheduled Substack digest. Each morning it collects every post published since the last run in your subscriptions, plus chats and DMs with new activity. Subagents read every post in full, and it sends one message: the posts worth reading in full (with a two-line summary and why), everything else grouped by publication, and a summary of your chats that puts anything addressed to you first.
+
+The model only does the judging. Everything deterministic is done by the server's digest tools, which are switched on by setting `SUBSTACK_DIGEST_DIR`: `digest_begin` fetches and dedups the posts and writes the work list, and `digest_finish` takes the model's summaries and picks, lays out the final message, and saves the state. The skill never touches a file.
 
 ### Setup
 
@@ -135,7 +137,7 @@ claude mcp add --scope user substack-reader -- node /absolute/path/to/substack-r
    ```
    Node 20 or later works, including the Node 26 in the Hermes image.
 2. **Log in** on a machine with a browser (`node dist/cli.js login`), then copy `~/.config/substack-reader/auth.json` into a directory on the Hermes host, for example `$HERMES_HOME/mcp/substack-reader-home/`. Keep it at owner-only permissions.
-3. **Register the server** in Hermes's `config.yaml`:
+3. **Register the server** in Hermes's `config.yaml`, with the digest tools switched on:
    ```yaml
    mcp_servers:
      substack-reader:
@@ -143,10 +145,13 @@ claude mcp add --scope user substack-reader -- node /absolute/path/to/substack-r
        args: ["/opt/data/mcp/substack-reader-mcp/dist/cli.js"]
        env:
          SUBSTACK_READER_HOME: /opt/data/mcp/substack-reader-home
+         SUBSTACK_DIGEST_DIR: /opt/data/sandbox/substack_digest
+         SUBSTACK_DIGEST_TZ: America/Denver
    ```
-4. **Install the skill:** copy `hermes/SKILL.md` to `$HERMES_HOME/skills/productivity/substack-digest/SKILL.md`, and `hermes/substack_digest_start.sh` to `$HERMES_HOME/scripts/`. Optionally, copy `hermes/interests.example.md` to `STATE_DIR/interests.md` and edit it (see below).
-5. **Edit the Settings block** at the top of `SKILL.md`: `STATE_DIR`, `TIMEZONE`, `MAX_PARALLEL` and the `REAUTH` message.
-6. **Restart Hermes and schedule it.** Cron times are in the Hermes host's local time:
+   `SUBSTACK_DIGEST_DIR` must be an absolute path the server's user can write. The server creates it if needed and keeps `state.json`, the run files and a lock file there. `SUBSTACK_DIGEST_TZ` is the IANA time zone for times shown in the digest (default UTC).
+4. **Install the skill:** copy `hermes/SKILL.md` to `$HERMES_HOME/skills/productivity/substack-digest/SKILL.md`, and `hermes/substack_digest_start.sh` to `$HERMES_HOME/scripts/`. Optionally, copy `hermes/interests.example.md` to `$SUBSTACK_DIGEST_DIR/interests.md` and edit it (see below).
+5. **Edit the Settings block** at the top of `SKILL.md`: `MAX_PARALLEL` and the `REAUTH` message.
+6. **Restart Hermes and schedule it.** Cron times are in the Hermes host's local time. The job needs only the `delegation` toolset and this server (no `file` toolset):
    ```bash
    hermes cron create "0 7 * * *" "Run the substack-digest skill and deliver the digest." \
      --name substack-digest --skill substack-digest --script substack_digest_start.sh --deliver discord:<channel-id>
@@ -156,16 +161,18 @@ claude mcp add --scope user substack-reader -- node /absolute/path/to/substack-r
 
 ### Customizing
 
-- **What gets picked:** `STATE_DIR/interests.md` is free text the skill reads on every run. Describe what you want more of. Name topics and writers to rank up, and kinds of posts (link roundups, podcast notes) to rank down.
-- **Sizes:** the numbers in the Procedure section (chunks of 5 posts per subagent, `per_publication: 20` when collecting) are plain instructions, so edit them directly.
-- **Output format:** the message template targets Discord Markdown. For Telegram, Slack or email, edit the template in the "Send the digest" step and the formatting rules under it.
+- **What gets picked:** `$SUBSTACK_DIGEST_DIR/interests.md` is free text that `digest_begin` passes to the model on every run (the first 4,000 characters). Describe what you want more of. Name topics and writers to rank up, and kinds of posts (link roundups, podcast notes) to rank down.
+- **Sizes:** the chunk size (5 posts per subagent) is a plain instruction in the skill. `digest_begin` takes `max_posts` (default 100); posts beyond it carry over to the next run.
+- **Output format:** the server lays out the message for Discord Markdown (`renderDigest` in `src/digest/render.ts`). `digest_finish` with `render: false` returns plain-text sections instead, for other destinations.
 - **Schedule and delivery:** use `hermes cron edit <job-id> --schedule "…"` or `--deliver …`.
 
 ### Things to know
 
-- **Tool results over about 50,000 characters don't reach the model.** Hermes saves them to a file the model can't parse, and cron runs can't run scripts to help. That's why the skill asks for results in smaller pages. Keep that in mind if you raise the limits.
+- **Tool results over about 50,000 characters don't reach the model.** Hermes saves them to a file the model can't parse, and cron runs can't run scripts to help. The digest tools keep their output under 40,000 characters and as plain text (Hermes wraps MCP results in JSON, so JSON output would be escaped twice).
 - **Reads everything:** the skill reads every new post, which suits a few dozen posts a day. With many more subscriptions, have it shortlist first, the way the Medium digest does.
-- **State:** each run records what it reported in `STATE_DIR/state.json`, so posts never repeat. A run that fails doesn't save state, so the next run covers the same period.
+- **State:** `digest_finish` records every post in the run in `$SUBSTACK_DIGEST_DIR/state.json` (the newest 500 URLs), so posts never repeat, including ones that couldn't be read. Writes are atomic and locked. `digest_begin` writes only `current_run.json`, so a run that dies before `digest_finish` saves nothing and the next run covers the same period. `last_run` is the server's clock when `digest_begin` started fetching. Use `digest_status` to inspect the state and `mark_reported` to repair it; don't edit the file while a run is going.
+- **Rate limits:** Substack answers 429 when it's asked for too many archives at once. `digest_begin` fetches 3 publications at a time, backs off 2, 5 and 10 seconds on a 429, and tries failed publications again after 15 and 30 seconds, within about 140 seconds in all (Hermes gives an MCP call 300). A publication that still fails is listed under "⚠ Couldn't check" and fetched from the same point next run; after 7 days the digest gives up on that period and says so.
+- **Chats:** Substack's unread flags for chats are never set, so the digest uses activity since the last run instead: a thread counts when it was created or replied to after `last_run`. Only the first few pages of each chat's threads are checked, so a reply to a very old thread can be missed.
 - **Read-only:** the skill never uses the tools that change your account.
 - **Cost:** a test run made 12 model calls and took about 5 minutes on Claude Sonnet. Cost grows with the number of new posts, because every post is read in full.
 - **Your own account:** this server uses Substack's undocumented web API with your session cookies. A daily digest is light, read-only use, but if Substack objects to automated access, it's your account at risk.
@@ -189,10 +196,22 @@ Publications can be named loosely: by name (*"The Pragmatic Engineer"*), part of
 
 | Tool | What it returns |
 |---|---|
-| `list_chats` | Your chat inbox: publication chats you're in and direct messages, with unread state |
+| `list_chats` | Your chat inbox: publication chats you're in and direct messages. Substack's unread flags here aren't reliable |
+| `get_chat_activity` | Chats and DMs with activity since a time (`"24h"`, an ISO time), and with `transcripts` only the new messages |
 | `get_chat_threads` | Threads in a publication's chat, newest first, with reply counts. `before` pages back |
 | `read_chat_thread` | A thread with its replies and replies to replies, as a readable transcript |
 | `read_dm` | One direct-message conversation |
+
+### Digest (opt-in)
+
+Registered only when `SUBSTACK_DIGEST_DIR` is set. They're built for the [Hermes digest](#daily-digest-with-hermes-agent) and return plain text.
+
+| Tool | What it does |
+|---|---|
+| `digest_begin` | Fetches every post since the last digest (minus ones already reported) and the chats with new activity, saves the work list, and returns it with a run id and post refs (`P1`, `P2`, …). Doesn't change the state |
+| `digest_finish` | Takes the model's verdict on each post (`pick`, `other`, `unreadable`, with a gist) and chat, lays out the final message and saves the state. Same `run_id` twice is harmless; `dry_run` saves nothing |
+| `digest_status` | The last run, reported-post count, publications waiting to be re-checked, and recent runs (read-only) |
+| `mark_reported` | Manual repair: adds post URLs to the reported list and optionally sets `last_run` |
 
 ### Account changes
 
@@ -201,7 +220,7 @@ Publications can be named loosely: by name (*"The Pragmatic Engineer"*), part of
 | `subscribe` | Free-subscribes you to a publication. Never starts a paid plan; does nothing if you're already subscribed |
 | `unsubscribe` | Removes a **free** subscription. Paid subscriptions are refused, and an ambiguous name lists the matches instead of guessing |
 
-Every tool except these two is marked read-only. These two are marked as changing your account, so MCP clients ask before running them, and `unsubscribe` is also marked destructive. After each change the server checks with Substack and reports what actually happened.
+Apart from the digest tools, every tool except these two is marked read-only. These two are marked as changing your account, so MCP clients ask before running them, and `unsubscribe` is also marked destructive. After each change the server checks with Substack and reports what actually happened.
 
 ## Logging in
 
@@ -234,6 +253,8 @@ Substack has no API keys or OAuth for readers, so the server uses your normal we
 | `SUBSTACK_BROWSER_PATH` | A Chromium-based browser for `login`, if Chrome and Edge aren't installed |
 | `SUBSTACK_USERNAME` | When logged out, `list_subscriptions` shows this user's *public* subscriptions |
 | `SUBSTACK_COOKIES_PATH` | A Cookie-Editor export from the original Python version, read as a fallback |
+| `SUBSTACK_DIGEST_DIR` | Absolute path of the digest's state directory. Setting it registers the digest tools |
+| `SUBSTACK_DIGEST_TZ` | IANA time zone for times shown in digests and chat activity (default `UTC`) |
 
 </details>
 
@@ -274,7 +295,12 @@ src/
   auth/login.ts          browser and paste login
   substack/http.ts       fetch wrapper: cookie scoping, custom-domain sessions, redirects, retries
   substack/api.ts        subscriptions, posts, feed, subscribe/unsubscribe
-  substack/chat.ts       chat inbox, threads, replies, direct messages
+  substack/chat.ts       chat inbox, threads, replies, direct messages, activity since a time
+  digest/collect.ts      digest_begin: fetch, dedup, write the run file
+  digest/finish.ts       digest_finish, digest_status, mark_reported
+  digest/render.ts       matching the model's verdicts to the run; the digest message
+  digest/state.ts        state.json v2, atomic writes, the lock file
+  time.ts                relative times and time-zone formatting
 test/                    one file per module, plus an in-memory MCP client test
 ```
 

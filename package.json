@@ -1,6 +1,6 @@
 {
   "name": "substack-reader-mcp",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "MCP server for reading and managing your Substack subscriptions, posts, and chats",
   "license": "MIT",
   "author": "Bill Baran",

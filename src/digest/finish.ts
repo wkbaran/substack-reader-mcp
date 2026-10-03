@@ -1,5 +1,5 @@
 import { isoSeconds } from "../time.js";
-import type { RunFile } from "./collect.js";
+import type { RunFile, RunPost } from "./collect.js";
 import { reconcile, renderDigest, renderStatus, type ChatJudgment, type PostJudgment, type Reconciled } from "./render.js";
 import {
   addReported,
@@ -77,6 +77,29 @@ async function readRun(dir: string, name: string): Promise<PreviousRun | null> {
 }
 
 const sameId = (a: string | undefined, b: string) => a !== undefined && a.trim().toLowerCase() === b.trim().toLowerCase();
+
+const POST_REF = /^P\d+$/i;
+
+export function isPostRef(s: string): boolean {
+  return POST_REF.test(s.trim());
+}
+
+/**
+ * Resolve a post ref such as "P3" for read_post, against the run in progress (or the
+ * last committed one). Subagents read by ref, so a ref the main model renumbers still
+ * fetches the post that ref names, and its gist can't land under another title.
+ */
+export async function resolvePostRef(dir: string, ref: string): Promise<RunPost> {
+  const want = ref.trim().toUpperCase();
+  const run = (await readRun(dir, FILES.currentRun)) ?? (await readRun(dir, FILES.previousRun));
+  if (!run) throw new Error(`"${want}" looks like a digest ref, but there is no digest run. Call digest_begin first, or pass the post URL.`);
+  const post = run.posts.find((p) => p.ref.toUpperCase() === want);
+  if (!post) {
+    const range = run.posts.length ? `P1–P${run.posts.length}` : "none";
+    throw new Error(`${want} isn't in digest run ${run.run_id}; its post refs are ${range}.`);
+  }
+  return post;
+}
 
 export async function digestFinish(dir: string, args: FinishArgs, { now = Date.now }: { now?: () => number } = {}): Promise<ToolText> {
   const work = async (): Promise<ToolText> => {

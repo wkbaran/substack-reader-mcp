@@ -9,10 +9,10 @@ import { renderChatActivity, renderMessages, renderThread, SubstackChat } from "
 import { AuthError, SubstackHttp, type FetchLike } from "./substack/http.js";
 import { digestDir as envDigestDir, digestTimezone } from "./config.js";
 import { digestBegin } from "./digest/collect.js";
-import { digestFinish, digestStatus, markReported } from "./digest/finish.js";
+import { digestFinish, digestStatus, isPostRef, markReported, resolvePostRef } from "./digest/finish.js";
 import { formatLocal, isoSeconds, parseSince } from "./time.js";
 
-const VERSION = "0.3.0";
+const VERSION = "0.3.1";
 
 /**
  * Hands out a client for the current credentials. Credentials are re-read on
@@ -187,7 +187,13 @@ export function createServer(provider = new ClientProvider(), opts: ServerOption
       description:
         "Read the full content of a Substack post as Markdown. Paid posts are returned in full when the logged-in account has access. Long posts are paged: pass `start` from the previous response to continue.",
       inputSchema: {
-        url: z.string().describe("Post URL (any Substack link format, including substack.com/home/post/p-123) or numeric post id."),
+        url: z
+          .string()
+          .describe(
+            dir
+              ? 'Post URL (any Substack link format, including substack.com/home/post/p-123), numeric post id, or a digest ref such as "P3" from digest_begin.'
+              : "Post URL (any Substack link format, including substack.com/home/post/p-123) or numeric post id.",
+          ),
         format: z.enum(["markdown", "text", "html"]).default("markdown"),
         start: z.number().int().min(0).default(0).describe("Character offset into the body, for paging."),
         max_chars: z.number().int().min(1000).max(200_000).default(40_000),
@@ -197,8 +203,11 @@ export function createServer(provider = new ClientProvider(), opts: ServerOption
     ({ url, format, start, max_chars }) =>
       run(async () => {
         const client = await provider.get();
-        const post = await client.post(url);
-        const { header, body } = renderPost(post, format);
+        const digestPost = dir && isPostRef(url) ? await resolvePostRef(dir, url) : undefined;
+        const post = await client.post(digestPost?.url ?? url);
+        const rendered = renderPost(post, format);
+        const { body } = rendered;
+        const header = digestPost ? `${rendered.header}\n- Digest ref: ${digestPost.ref}` : rendered.header;
         const chunk = body.slice(start, start + max_chars);
         const end = start + chunk.length;
         const more =

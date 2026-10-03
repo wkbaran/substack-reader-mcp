@@ -1,7 +1,7 @@
 ---
 name: substack-digest
 description: Digest of every new Substack post and chat activity since the last run, each post read in full by subagents, with picks worth reading deeply. Uses the substack-reader MCP server's digest tools.
-version: 3.0.0
+version: 3.1.0
 platforms: [linux]
 metadata:
   hermes:
@@ -39,20 +39,20 @@ Call `digest_begin` with no arguments.
 ### 2. Read every post, in batches of subagents
 Split the posts into chunks of **5**. Call `delegate_task` with `tasks=[…]` of **at most `MAX_PARALLEL` tasks per call**, and keep calling it until every chunk is done. For example, 23 posts make 5 chunks, which take 3 `delegate_task` calls with `MAX_PARALLEL` 2.
 
-Give each task this goal, with its posts (ref, title, publication, URL) listed in the context:
+Give each task this goal, with its refs listed. **List only the refs, exactly as `digest_begin` numbered them (for example `P6, P7, P8, P9, P10`).** Don't renumber them, and don't add titles or URLs: `read_post` looks each ref up on the server, so a ref always fetches the post it names.
 
-> Read each of these Substack posts in full with `read_post` (`max_chars: 40000`). If the response says there is more, call `read_post` again with the given `start` until you reach the end. Don't skim, and don't summarize from the title. Call one tool per `tool_call`, and write no files. For each post, return exactly this block and nothing else:
+> For each ref below, call `read_post` with `url` set to the ref exactly as given (for example `"P3"`) and `max_chars: 40000`. The header's `- Digest ref:` line confirms which post you got. If the response says there is more, call `read_post` again with the given `start` until you reach the end. Don't skim, and don't summarize from the title. Call one tool per `tool_call`, and write no files. For each post, return exactly this block and nothing else:
 >
 > ```
-> REF: <ref, e.g. P3>
+> REF: [the ref exactly as given, e.g. P3]
 > ACCESS: full | preview-only
 > TYPE: essay | reporting | analysis | tutorial | link-roundup | announcement | podcast-notes | fiction | other
-> GIST: <2–3 sentences: the actual argument or findings, not the topic>
-> DEPTH: <1–5, how much is lost by reading only the gist: 5 = dense original thinking or evidence that doesn't compress; 1 = the gist covers it>
-> WHY: <one sentence justifying DEPTH, naming what's distinctive>
+> GIST: [2–3 sentences: the actual argument or findings, not the topic]
+> DEPTH: [1–5, how much is lost by reading only the gist: 5 = dense original thinking or evidence that doesn't compress; 1 = the gist covers it]
+> WHY: [one sentence justifying DEPTH, naming what's distinctive]
 > ```
 >
-> `ACCESS` is `preview-only` when `read_post`'s header says "Only a preview was returned". If `read_post` fails for a post, return its block with `GIST: (could not read: <error>)` and `DEPTH: 0`.
+> `ACCESS` is `preview-only` when `read_post`'s header says "Only a preview was returned". If `read_post` fails for a ref, return its block with `GIST: (could not read: [error])` and `DEPTH: 0`.
 
 If a chunk comes back missing posts, retry **that chunk once** in the next `delegate_task` call. After that, keep whatever came back. Don't read posts yourself in the main session.
 
@@ -62,10 +62,10 @@ If `digest_begin` listed chats with activity, send one more `delegate_task` batc
 > For each chat, call `get_chat_activity` once with exactly the arguments given for it. Never post or reply. Return one block per chat:
 >
 > ```
-> CHAT_ID: <chat id>
-> TOPICS: <1–3 sentences on what's being discussed>
-> FOR_USER: <any question or mention directed at the user, else "none">
-> POSTS_DISCUSSED: <URLs or titles of posts people are discussing, else "none">
+> CHAT_ID: [chat id]
+> TOPICS: [1–3 sentences on what's being discussed]
+> FOR_USER: [any question or mention directed at the user, else "none"]
+> POSTS_DISCUSSED: [URLs or titles of posts people are discussing, else "none"]
 > ```
 
 ### 4. Rank

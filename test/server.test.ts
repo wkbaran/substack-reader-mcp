@@ -144,6 +144,9 @@ describe("digest tools", () => {
       ],
     },
     "https://substack.com/api/v1/messages/inbox?tab=all": authed({ threads: [] }),
+    "https://example.substack.com/api/v1/posts/second": {
+      body: { id: 3, title: "Second", audience: "everyone", canonical_url: "https://example.substack.com/p/second", body_html: "<p>Second body.</p>" },
+    },
   };
   const connectDigest = () => connect(routes, { digestDir: dir, timezone: "America/Denver", now: () => NOW, sleep: async () => {} });
   const runIdOf = (t: string) => t.match(/^RUN_ID: (\S+)$/m)![1]!;
@@ -195,6 +198,20 @@ describe("digest tools", () => {
     const status = textOf(await client.callTool({ name: "digest_status", arguments: {} }));
     expect(status).toContain("LAST RUN: 2026-10-02T12:00:24Z (Fri, Oct 2, 6:00 AM MDT)");
     expect(status).toContain(`- ${runId} |`);
+  });
+
+  it("read_post resolves a digest ref to that run's post", async () => {
+    const client = await connectDigest();
+    const begin = textOf(await client.callTool({ name: "digest_begin", arguments: {} }));
+    expect(begin).toContain("P2 | Second | Example");
+    const read = textOf(await client.callTool({ name: "read_post", arguments: { url: "p2" } }));
+    expect(read).toMatch(/^# Second/);
+    expect(read).toContain("- Digest ref: P2");
+    expect(read).toContain("Second body.");
+
+    const missing = await client.callTool({ name: "read_post", arguments: { url: "P9" } });
+    expect(missing.isError).toBe(true);
+    expect(textOf(missing)).toMatch(/P9 isn't in digest run .*; its post refs are P1–P2/);
   });
 
   it("rejects an unknown run_id", async () => {

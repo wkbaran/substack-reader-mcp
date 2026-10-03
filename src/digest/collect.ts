@@ -301,7 +301,7 @@ export function renderBegin(run: RunFile, interests: string): string {
   lines.push(
     "",
     run.posts.length || run.chats.length
-      ? `NEXT: Read every post (${range || "none"}) and summarize every chat (${run.chats.map((c) => c.ref).join(", ") || "none"}). Then call digest_finish once with run_id "${run.run_id}", one posts entry per post ({"ref": "P1", "section": "pick" | "other" | "unreadable", "gist", "why", "preview_only"}) and one chats entry per chat ({"id": "<chat id>", "topics", "for_user"}).`
+      ? `NEXT: Read every post (${range || "none"}): read_post takes the ref itself (url: "P3"), so hand subagents the refs exactly as listed here, never renumbered. Summarize every chat (${run.chats.map((c) => c.ref).join(", ") || "none"}). Then call digest_finish once with run_id "${run.run_id}", one posts entry per post ({"ref": "P1", "section": "pick" | "other" | "unreadable", "gist", "why", "preview_only"}) and one chats entry per chat ({"id": "the chat id", "topics", "for_user"}).`
       : `NEXT: Nothing new to read. Call digest_finish with run_id "${run.run_id}", posts: [] and chats: [].`,
   );
 

@@ -1,8 +1,13 @@
 # The headline classifier
 
-The digest has three jobs: decide which posts matter to you, read them, and present them. The first job is the heart of it. It's where your taste lives, and it can be done from headlines alone, before any model reads a post. So it's its own component, `src/classifier/`, with one interface, swappable backends and its own evaluation loop. Reading, summarizing and presenting stay with the agent and `digest_finish`.
+> **It matters less on Substack than on Medium, and it's off by default.**
+> - **Your Substack feed is only what you subscribe to.** You've already curated it, so there's less noise to filter, and the digest can afford to read every post.
+> - **The classifier was built for [medium-reader-mcp](https://github.com/wkbaran/medium-reader-mcp)**, where the feed is effectively endless. Following plus "For you" bring 100–200 new posts a day from writers you never chose, so filtering and ranking before reading is essential there.
+> - **The same component was carried over here** for what it still helps with: reading in priority order, sharper "Read in full" picks, skipping the occasional kind of post you never want (podcast show notes, trade alerts), and a rank floor if your subscription list grows large.
 
-The classifier is **optional and off by default** here. Without it the digest works as it always has: every post is read, and the agent's model picks the best from what the subagents report. With it:
+The digest has three jobs: decide which posts matter to you, read them, and present them. The classifier does the first, from headlines alone, before any model reads a post. It's its own component, `src/classifier/`, with one interface, swappable backends and its own evaluation loop. Reading, summarizing and presenting stay with the agent and `digest_finish`.
+
+Without it, the digest works as it always has: every post is read, and the agent's model picks the best from what the subagents report. With it:
 
 ```
 digest_begin ──► classifier ──► POSTS, best first ──► subagents read them ──► agent picks ──► digest_finish
@@ -34,6 +39,10 @@ Since this digest reads everything you subscribe to, the classifier mostly order
 
 Choose with `SUBSTACK_CLASSIFIER=jev | sampling | off` (default `off`). `jev` without a key falls back to `sampling` and says so under WARNINGS. Pin the Jev version with `SUBSTACK_JEV_MODEL` (default `typesafe/jev-1.13`): thresholds are tuned against a specific version.
 
+**What "sampling" means.** MCP sampling is a protocol feature: the server sends a prompt back to the MCP client (`sampling/createMessage`), and the client runs it on its own LLM. The server needs no model or key of its own. In Hermes, that model is `auxiliary.mcp`, or `mcp_servers.<name>.sampling.model` for one server. The name is LLM jargon: generating text is "sampling" tokens from a model.
+
+**Who ranks with `sampling`.** The sampling backend only decides skips. The server doesn't sort the list, so prioritizing is left to the agent's model when it shortlists and picks ⭐ posts. Here that's the default anyway: with the classifier off, subagents read every post and the agent's model picks from their reports. With `jev`, the server ranks, and the agent starts from a sorted list.
+
 Jev gets one request per post. It judges one input against several questions, so posts can't be batched into one prompt. The request carries your Interests and Skip bullets plus the post's headline, and asks two questions:
 
 - `importance`: a 4-level Score from "not for this reader" to "must read". Its probability-weighted position becomes the rank.
@@ -49,7 +58,7 @@ mcp_servers:
     env:
       SUBSTACK_DIGEST_DIR: /opt/data/sandbox/substack_digest
       SUBSTACK_CLASSIFIER: jev
-      OPENROUTER_API_KEY: sk-or-…
+      OPENROUTER_API_KEY: ${JEV_OPENROUTER_API_KEY}   # set in Hermes's .env; a separate name keeps Hermes itself from using it
       # SUBSTACK_DIGEST_SKIP_THRESHOLD: 0.7   # from analyze.mjs
       # SUBSTACK_DIGEST_RANK_FLOOR: 0.1       # only if analyze.mjs recommends one
 ```

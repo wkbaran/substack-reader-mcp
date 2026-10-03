@@ -67,6 +67,7 @@ describe("MCP server", () => {
       "get_reading_history",
       "get_recent_posts",
       "get_saved_posts",
+      "interests_evidence",
       "list_chats",
       "list_subscriptions",
       "read_chat_thread",
@@ -323,7 +324,7 @@ describe("digest tools", () => {
   });
 });
 
-describe("reader shelves", () => {
+describe("reader shelves and interests evidence", () => {
   let dir: string;
   beforeEach(async () => {
     process.env.SUBSTACK_READER_HOME = await mkdtemp(join(tmpdir(), "substack-reader-"));
@@ -371,5 +372,28 @@ describe("reader shelves", () => {
     expect(savedPosts.items).toMatchObject([{ title: "Saved for later", saved: true, publication: "Example" }]);
     const liked = JSON.parse(textOf(await client.callTool({ name: "get_liked_posts", arguments: {} })));
     expect(liked.items.map((p: { title: string }) => p.title)).toEqual(["Hearted post"]);
+  });
+
+  it("gathers interests evidence by strength and saves a proposal beside interests.md", async () => {
+    await writeFile(join(dir, "interests.md"), "## Interests\n- Economics\n");
+    const client = await connect(routes, { digestDir: dir });
+    const ev = textOf(await client.callTool({ name: "interests_evidence", arguments: {} }));
+    expect(ev).toMatch(/^INTERESTS EVIDENCE · Substack/);
+    expect(ev).toContain("## Paid subscriptions [STRONG: chosen deliberately] (1)");
+    expect(ev).toContain("Paid Pub");
+    expect(ev).toContain("- Saved for later (Example)");
+    expect(ev).toContain("- Hearted post (Example)");
+    expect(ev).toMatch(/## Read to the end \(80%\+\) \[STRONG[^\]]*\] \(2\)/);
+    expect(ev).toContain("- Finished essay (Paid Pub) [read 95%]");
+    expect(ev).toContain("## Read partway (30–80%) [MEDIUM");
+    expect(ev).toContain("## Opened, then left (under 30%) [WEAK");
+    expect(ev).toContain("## Dismissed from the inbox [NEGATIVE");
+    expect(ev).toContain("- $10k trade alert (Example)");
+    expect(ev).toContain("===== CURRENT interests.md =====\n## Interests\n- Economics");
+
+    const out = textOf(await client.callTool({ name: "save_interests_proposal", arguments: { text: "## Interests\n- Economics\n- Long-form history essays\n\n## Skip\n- Trade alerts" } }));
+    expect(out).toContain("+ Long-form history essays");
+    expect(await readFile(join(dir, "interests.proposed.md"), "utf8")).toBe("## Interests\n- Economics\n- Long-form history essays\n\n## Skip\n- Trade alerts\n");
+    expect(await readFile(join(dir, "interests.md"), "utf8")).toBe("## Interests\n- Economics\n");
   });
 });

@@ -1,8 +1,13 @@
 # The headline classifier
 
-The digest has three jobs: decide which posts matter to you, read them, and present them. The first job is the heart of it. It's where your taste lives, and it can be done from headlines alone, before any model reads a post. So it's its own component, `src/classifier/`, with one interface, swappable backends and its own evaluation loop. Reading, summarizing and presenting stay with the agent and `digest_finish`.
+> **It matters less on Substack than on Medium, and it's off by default.**
+> - **Your Substack feed is only what you subscribe to.** You've already curated it, so there's less noise to filter, and the digest can afford to read every post.
+> - **The classifier was built for [medium-reader-mcp](https://github.com/wkbaran/medium-reader-mcp)**, where the feed is effectively endless. Following plus "For you" bring 100–200 new posts a day from writers you never chose, so filtering and ranking before reading is essential there.
+> - **The same component was carried over here** for what it still helps with: reading in priority order, sharper "Read in full" picks, skipping the occasional kind of post you never want (podcast show notes, trade alerts), and a rank floor if your subscription list grows large.
 
-The classifier is **optional and off by default** here. Without it the digest works as it always has: every post is read, and the agent's model picks the best from what the subagents report. With it:
+The digest has three jobs: decide which posts matter to you, read them, and present them. The classifier does the first, from headlines alone, before any model reads a post. It's its own component, `src/classifier/`, with one interface, swappable backends and its own evaluation loop. Reading, summarizing and presenting stay with the agent and `digest_finish`.
+
+Without it, the digest works as it always has: every post is read, and the agent's model picks the best from what the subagents report. With it:
 
 ```
 digest_begin ──► classifier ──► POSTS, best first ──► subagents read them ──► agent picks ──► digest_finish
@@ -25,14 +30,28 @@ Since this digest reads everything you subscribe to, the classifier mostly order
 
 | | `jev` | `sampling` |
 | --- | --- | --- |
-| What | [Jev](jev/README.md), TypeSafe's decision model, through OpenRouter's Decisions API | The MCP client's own model, through MCP sampling (Hermes: `auxiliary.mcp` or `mcp_servers.<name>.sampling.model`) |
+| What | A [Jev](jev/README.md)-style decision model at any decisions-API endpoint (default: TypeSafe's Jev on OpenRouter), called directly over HTTPS | The MCP client's own model, through MCP sampling (Hermes: `auxiliary.mcp` or `mcp_servers.<name>.sampling.model`) |
 | Ranks | yes (calibrated scale) | no: skip only |
 | Speed | ~2–4 s per 100 posts (8 parallel requests) | ~110 s per 100 with a local 27B model |
-| Cost | ~$0.003 per 100 posts (input tokens only) | free, but occupies the client's model |
-| Needs | `OPENROUTER_API_KEY` | a client that supports sampling |
+| Cost | on OpenRouter, ~$0.003 per 100 posts (input tokens only) | free, but occupies the client's model |
+| Needs | an endpoint and usually a key (`SUBSTACK_JEV_URL`, `SUBSTACK_JEV_API_KEY`) | a client that supports sampling |
 | If it fails | nothing is skipped or ranked; `digest_begin` says why | same |
 
-Choose with `SUBSTACK_CLASSIFIER=jev | sampling | off` (default `off`). `jev` without a key falls back to `sampling` and says so under WARNINGS. Pin the Jev version with `SUBSTACK_JEV_MODEL` (default `typesafe/jev-1.13`): thresholds are tuned against a specific version.
+Choose with `SUBSTACK_CLASSIFIER=jev | sampling | off`.
+
+**`jev` works with any provider that speaks the decisions API.** The request is POST `{model, state, questions}` and the response is `{answers, usage}`. You configure it the way you'd point an OpenAI-compatible client at a local model:
+
+| Setting | Default | Examples |
+| --- | --- | --- |
+| `SUBSTACK_JEV_URL` | `https://openrouter.ai/api/alpha/decisions` | OpenRouter's Decisions API (default); `https://openrouter.ai/api/v1/systemone` (OpenRouter's System One API); TypeSafe's own System One endpoint; a compatible self-hosted server such as `http://localhost:8080/v1/systemone` |
+| `SUBSTACK_JEV_API_KEY` | `OPENROUTER_API_KEY` | The bearer token for that endpoint. Leave it empty for a server without auth |
+| `SUBSTACK_JEV_MODEL` | `typesafe/jev-1.13` | OpenRouter ids carry the `typesafe/` prefix; TypeSafe's own API takes `jev-1.13`. Pin a version: thresholds are tuned against one |
+
+On the default OpenRouter URL with no key, `jev` falls back to `sampling` and says so in the work list's warnings. The status line names a non-default endpoint, e.g. `Classifier jev (jev-1.13 at localhost:8080)`.
+
+**What "sampling" means.** MCP sampling is a protocol feature: the server sends a prompt back to the MCP client (`sampling/createMessage`), and the client runs it on its own LLM. The server needs no model or key of its own. In Hermes, that model is `auxiliary.mcp`, or `mcp_servers.<name>.sampling.model` for one server. The name is LLM jargon: generating text is "sampling" tokens from a model.
+
+**Who ranks with `sampling`.** The sampling backend only decides skips. The server doesn't sort the list, so prioritizing is left to the agent's model when it shortlists and picks ⭐ posts. Here that's the default anyway: with the classifier off, subagents read every post and the agent's model picks from their reports. With `jev`, the server ranks, and the agent starts from a sorted list.
 
 Jev gets one request per post. It judges one input against several questions, so posts can't be batched into one prompt. The request carries your Interests and Skip bullets plus the post's headline, and asks two questions:
 
@@ -49,7 +68,8 @@ mcp_servers:
     env:
       SUBSTACK_DIGEST_DIR: /opt/data/sandbox/substack_digest
       SUBSTACK_CLASSIFIER: jev
-      OPENROUTER_API_KEY: sk-or-…
+      SUBSTACK_JEV_API_KEY: ${JEV_OPENROUTER_API_KEY}   # set in Hermes's .env; a separate name keeps Hermes itself from using it
+      # SUBSTACK_JEV_URL: https://openrouter.ai/api/alpha/decisions   # the default; any decisions-API endpoint
       # SUBSTACK_DIGEST_SKIP_THRESHOLD: 0.7   # from analyze.mjs
       # SUBSTACK_DIGEST_RANK_FLOOR: 0.1       # only if analyze.mjs recommends one
 ```
@@ -63,8 +83,9 @@ All settings are environment variables on the MCP server (in Hermes: `mcp_server
 | Variable | Default | What it does |
 | --- | --- | --- |
 | `SUBSTACK_CLASSIFIER` | `off` | `jev`, `sampling` or `off`. Default: no classifier; every post is read as before. |
-| `OPENROUTER_API_KEY` | none | Required for `jev`. Without it, `jev` falls back to `sampling` and says so in the work list's warnings. |
-| `SUBSTACK_JEV_MODEL` | `typesafe/jev-1.13` | The Jev version. Pin one: thresholds are tuned against a specific version. |
+| `SUBSTACK_JEV_URL` | OpenRouter's Decisions API | The decisions-API endpoint `jev` calls. Any compatible provider |
+| `SUBSTACK_JEV_API_KEY` | `OPENROUTER_API_KEY` | Bearer token for that endpoint; can be empty for a custom URL without auth. On the default URL with no key, `jev` falls back to `sampling` with a warning |
+| `SUBSTACK_JEV_MODEL` | `typesafe/jev-1.13` | The model id. Pin a version: thresholds are tuned against one |
 | `SUBSTACK_DIGEST_SKIP_THRESHOLD` | `0.7` | Posts with a skip probability at or above this are dropped. `1` effectively turns skipping off. |
 | `SUBSTACK_DIGEST_RANK_FLOOR` | `0` (off) | Posts ranked below this are listed apart (see above). Only with a ranking backend. |
 

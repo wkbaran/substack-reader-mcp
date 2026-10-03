@@ -7,7 +7,8 @@ import { renderPost } from "./format.js";
 import { SubstackClient } from "./substack/api.js";
 import { renderChatActivity, renderMessages, renderThread, SubstackChat } from "./substack/chat.js";
 import { AuthError, SubstackHttp, type FetchLike } from "./substack/http.js";
-import { digestDir as envDigestDir, digestTimezone } from "./config.js";
+import { digestDir as envDigestDir, digestRankFloor, digestSkipThreshold, digestTimezone } from "./config.js";
+import { classifierFromEnv, samplingFn } from "./classifier/index.js";
 import { digestBegin } from "./digest/collect.js";
 import { digestFinish, digestStatus, isPostRef, markReported, resolvePostRef } from "./digest/finish.js";
 import { formatLocal, isoSeconds, parseSince } from "./time.js";
@@ -388,8 +389,20 @@ function registerDigestTools(server: McpServer, provider: ClientProvider, dir: s
     ({ max_posts, include_chats, first_run_lookback }) =>
       run(async () => {
         const client = await provider.get();
+        // Off unless SUBSTACK_CLASSIFIER is set: the digest reads every post anyway, so ranking is an opt-in extra.
+        const { classifier, warning } = classifierFromEnv("SUBSTACK", samplingFn(server), process.env, "off");
         const { text: out } = await digestBegin(
-          { dir, client, timezone: tz.timeZone, configWarnings: tz.warning ? [tz.warning] : [], now: opts.now, sleep: opts.sleep },
+          {
+            dir,
+            client,
+            timezone: tz.timeZone,
+            configWarnings: [tz.warning, warning].filter((w): w is string => Boolean(w)),
+            now: opts.now,
+            sleep: opts.sleep,
+            classifier,
+            threshold: digestSkipThreshold(),
+            rankFloor: digestRankFloor(),
+          },
           { maxPosts: max_posts, includeChats: include_chats, firstRunLookback: first_run_lookback },
         );
         return text(out);
@@ -453,7 +466,13 @@ function registerDigestTools(server: McpServer, provider: ClientProvider, dir: s
       description: "Read-only: the digest's last run, number of reported posts, publications waiting to be re-checked, and the current and recent runs. For debugging.",
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
-    () => run(async () => text(await digestStatus(dir, tz.timeZone))),
+    () =>
+      run(async () => {
+        const c = classifierFromEnv("SUBSTACK", samplingFn(server), process.env, "off").classifier;
+        const floor = digestRankFloor();
+        const config = `CLASSIFIER CONFIG: ${c.name} · skip threshold ${Math.round(digestSkipThreshold() * 100)}%${floor ? ` · rank floor ${Math.round(floor * 100)}%` : ""}`;
+        return text(`${await digestStatus(dir, tz.timeZone)}\n${config}`);
+      }),
   );
 
   server.registerTool(

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { saveCredentials } from "../src/auth/credentials.js";
 import { ClientProvider, createServer } from "../src/server.js";
 import { authed, fakeFetch, SID } from "./helpers.js";
@@ -34,6 +34,7 @@ describe("MCP server", () => {
   });
   afterEach(() => {
     process.env = { ...saved };
+    vi.unstubAllGlobals();
   });
 
   const routes = {
@@ -129,6 +130,7 @@ describe("digest tools", () => {
   });
   afterEach(() => {
     process.env = { ...saved };
+    vi.unstubAllGlobals();
   });
 
   const routes = {
@@ -166,6 +168,49 @@ describe("digest tools", () => {
     expect(tools.every((t) => !t.outputSchema)).toBe(true);
   });
 
+  it("ranks and skips with Jev when SUBSTACK_CLASSIFIER=jev: sorted list, skipped posts need no entry, low-ranked ones go under Also new", async () => {
+    process.env.SUBSTACK_CLASSIFIER = "jev";
+    process.env.OPENROUTER_API_KEY = "test-key";
+    process.env.SUBSTACK_DIGEST_RANK_FLOOR = "0.3";
+    await writeFile(join(dir, "interests.md"), "# Interests\n\n## Interests\n- Economics\n\n## Skip\n- Podcast show notes\n");
+    const sent: Array<{ state: { reader: unknown; headline: { title: string; publication: string } } }> = [];
+    vi.stubGlobal("fetch", async (url: string, init: { body: string }) => {
+      expect(url).toBe("https://openrouter.ai/api/alpha/decisions");
+      const body = JSON.parse(init.body);
+      sent.push(body);
+      const t = body.state.headline.title as string;
+      const score = t === "Second" ? 2.7 : t === "Fresh take" ? 0.6 : 0;
+      return new Response(JSON.stringify({ answers: { importance: { type: "score", score }, skip_ctx: { type: "noul", noul: t === "Episode 12" ? 0.95 : 0.1 } } }));
+    });
+    const withPodcast = {
+      ...routes,
+      "https://example.substack.com/api/v1/archive?sort=new&offset=0&limit=20": {
+        body: [
+          { id: 4, title: "Episode 12", post_date: "2026-10-02T10:00:00Z", audience: "everyone", canonical_url: "https://example.substack.com/p/ep12" },
+          ...(routes["https://example.substack.com/api/v1/archive?sort=new&offset=0&limit=20"].body as unknown[]),
+        ],
+      },
+    };
+    const client = await connect(withPodcast, { digestDir: dir, timezone: "America/Denver", now: () => NOW, sleep: async () => {} });
+    const begin = textOf(await client.callTool({ name: "digest_begin", arguments: {} }));
+    expect(sent).toHaveLength(3);
+    expect(sent[0]!.state.reader).toEqual({ interests: ["Economics"], skips: ["Podcast show notes"] });
+    expect(begin).toContain("CLASSIFIER: jev (typesafe/jev-1.13): 3 ranked · 1 skipped (threshold 70%) · 1 below rank floor 30%");
+    expect(begin).toMatch(/POSTS, best-ranked first .*\nP3 \| 90 \| Second \| Example/);
+    expect(begin).toMatch(/RANKED LOW \(below 30;.*\nP2 \| 20 \| Fresh take/);
+    expect(begin).toContain("SKIPPED BY CLASSIFIER (match the user's Skip list; don't read them, no entry needed):\nP1 Episode 12");
+    expect(begin).toContain("NEXT: Read every post (the 1 under POSTS, best-ranked first)");
+
+    const out = textOf(await client.callTool({ name: "digest_finish", arguments: { run_id: runIdOf(begin), posts: [{ ref: "P3", section: "pick", gist: "Good.", why: "Yes." }], chats: [] } }));
+    expect(out).toContain("COUNTS: 3 posts (1 picks, 0 other, 0 couldn't read, 0 not summarized, 1 skipped, 1 ranked low and unread)");
+    expect(out).toContain("WARNINGS: none");
+    expect(out).toContain("📎 **Also new** _(ranked low, not read)_\n• Fresh take — Example [paid] https://example.substack.com/p/fresh");
+    expect(out).toMatch(/🗑 Skipped 1 by the classifier$/);
+    expect(out).not.toContain("Couldn't read");
+    expect(JSON.parse(await readFile(join(dir, "state.json"), "utf8")).reported_posts).toHaveLength(4);
+    expect(textOf(await client.callTool({ name: "digest_status", arguments: {} }))).toContain("CLASSIFIER CONFIG: jev (typesafe/jev-1.13) · skip threshold 70% · rank floor 30%");
+  });
+
   it("runs begin -> finish, saves state, and repeats the result for the same run_id", async () => {
     const client = await connectDigest();
     const begin = textOf(await client.callTool({ name: "digest_begin", arguments: {} }));
@@ -188,7 +233,11 @@ describe("digest tools", () => {
     expect(state.last_run).toBe("2026-10-02T12:00:24Z");
     expect(state.reported_posts).toEqual(["https://example.substack.com/p/old", "https://example.substack.com/p/fresh", "https://example.substack.com/p/second"]);
     expect(Object.keys(state).at(-1)).toBe("reported_posts");
-    expect((await readdir(dir)).sort()).toEqual(["previous_run.json", "state.json"]);
+    expect((await readdir(dir)).sort()).toEqual(["previous_run.json", "runs", "state.json"]);
+    const archived = JSON.parse(await readFile(join(dir, "runs", `${runId}.json`), "utf8"));
+    expect(archived).toMatchObject({ run_id: runId, judged: { picks: ["P1"], others: ["P2"] } });
+    expect(archived.posts.map((p: { title: string }) => p.title)).toEqual(["Fresh take", "Second"]);
+    expect(begin).not.toContain("CLASSIFIER:"); // off by default
 
     const again = await client.callTool({ name: "digest_finish", arguments: { run_id: runId, posts: [], chats: [] } });
     expect(again.isError).toBeFalsy();
@@ -270,3 +319,4 @@ describe("digest tools", () => {
     expect(textOf(result)).toMatch(/substack-reader-mcp login/);
   });
 });
+

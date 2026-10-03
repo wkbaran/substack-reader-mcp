@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { chmod, lstat, mkdir, open, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { normalizePostUrl } from "../substack/api.js";
 
@@ -13,7 +13,11 @@ export const FILES = {
   previousRun: "previous_run.json",
   interests: "interests.md",
   lock: "state.lock",
+  /** Directory of committed runs, newest KEEP_RUNS kept: headlines for tools/classifier. */
+  runs: "runs",
 } as const;
+
+export const KEEP_RUNS = 14;
 
 export const MAX_REPORTED = 500;
 /** A publication that couldn't be checked for this long is given up on. */
@@ -215,4 +219,27 @@ export async function withLock<T>(dir: string, fn: () => Promise<T>, { staleMs =
 
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Save a committed run as runs/<run_id>.json and keep only the newest KEEP_RUNS.
+ * Nothing reads these during a digest; they're history for tools/classifier.
+ */
+export async function archiveRun(dir: string, runId: string, content: string, keep = KEEP_RUNS): Promise<void> {
+  if (!/^[\w-]+$/.test(runId)) throw new Error(`invalid run id ${runId}`);
+  const runs = await safePath(dir, FILES.runs);
+  const info = await lstat(runs).catch(() => null);
+  if (info && !info.isDirectory()) throw new Error(`${runs} isn't a directory; refusing to use it.`);
+  if (!info) await mkdir(runs, { mode: 0o755 });
+  const file = join(runs, `${runId}.json`);
+  const tmp = `${file}.tmp-${process.pid}-${randomBytes(3).toString("hex")}`;
+  try {
+    await writeFile(tmp, content, { mode: FILE_MODE, flag: "wx" });
+    await rename(tmp, file);
+  } catch (err) {
+    await rm(tmp, { force: true });
+    throw err;
+  }
+  const names = (await readdir(runs)).filter((n) => /^[\w-]+\.json$/.test(n)).sort();
+  for (const n of names.slice(0, Math.max(0, names.length - keep))) await rm(join(runs, n), { force: true });
 }

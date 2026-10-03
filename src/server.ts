@@ -58,7 +58,7 @@ export function createServer(provider = new ClientProvider(), opts: ServerOption
     { name: "substack-reader", version: VERSION },
     {
       instructions:
-        "Read the user's Substack subscriptions. Start with list_subscriptions or get_feed; " +
+        "Read the user's Substack subscriptions, reading history, and saved and liked posts. Start with list_subscriptions or get_feed; " +
         "subscribe/unsubscribe change the user's account (free subscriptions only) and should only be used when asked. " +
         "publications can be referred to by name, subdomain, or URL. If a tool reports an auth " +
         "problem, tell the user to run `substack-reader-mcp login` in a terminal — do not retry in a loop." +
@@ -159,6 +159,61 @@ export function createServer(provider = new ClientProvider(), opts: ServerOption
       run(async () => {
         const client = await provider.get();
         return json(await client.posts(publication, { limit, offset }));
+      }),
+  );
+
+  server.registerTool(
+    "get_reading_history",
+    {
+      title: "Get reading history",
+      description:
+        "Posts the user has opened on substack.com or in the app (the inbox's Seen tab), most recent first, with how far they read each one (readProgress 0–1), whether they hearted or saved it, and when they opened it. Posts read only by email don't appear. Pass nextCursor back as `cursor` for older ones.",
+      inputSchema: {
+        limit: z.number().int().min(1).max(200).default(40),
+        cursor: z.string().optional().describe("nextCursor from a previous call."),
+      },
+      annotations: readOnly,
+    },
+    ({ limit, cursor }) =>
+      run(async () => {
+        const client = await provider.get();
+        return json(await client.readerPosts("seen", { limit, cursor }));
+      }),
+  );
+
+  server.registerTool(
+    "get_saved_posts",
+    {
+      title: "Get saved posts",
+      description: "Posts the user saved for later on Substack (the inbox's Saved tab), most recently saved first. Pass nextCursor back as `cursor` for more.",
+      inputSchema: {
+        limit: z.number().int().min(1).max(200).default(40),
+        cursor: z.string().optional().describe("nextCursor from a previous call."),
+      },
+      annotations: readOnly,
+    },
+    ({ limit, cursor }) =>
+      run(async () => {
+        const client = await provider.get();
+        return json(await client.readerPosts("saved", { limit, cursor }));
+      }),
+  );
+
+  server.registerTool(
+    "get_liked_posts",
+    {
+      title: "Get liked posts",
+      description: "Posts the user hearted on Substack (their profile's Likes, posts only), most recent first. Pass nextCursor back as `cursor` for more.",
+      inputSchema: {
+        limit: z.number().int().min(1).max(200).default(40),
+        cursor: z.string().optional().describe("nextCursor from a previous call."),
+      },
+      annotations: readOnly,
+    },
+    ({ limit, cursor }) =>
+      run(async () => {
+        const client = await provider.get();
+        return json(await client.likedPosts({ limit, cursor }));
       }),
   );
 

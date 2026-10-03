@@ -63,7 +63,10 @@ describe("MCP server", () => {
       "get_chat_activity",
       "get_chat_threads",
       "get_feed",
+      "get_liked_posts",
+      "get_reading_history",
       "get_recent_posts",
+      "get_saved_posts",
       "list_chats",
       "list_subscriptions",
       "read_chat_thread",
@@ -320,3 +323,53 @@ describe("digest tools", () => {
   });
 });
 
+describe("reader shelves", () => {
+  let dir: string;
+  beforeEach(async () => {
+    process.env.SUBSTACK_READER_HOME = await mkdtemp(join(tmpdir(), "substack-reader-"));
+    process.env.SUBSTACK_SID = SID;
+    dir = await mkdtemp(join(tmpdir(), "substack-digest-"));
+  });
+  afterEach(() => {
+    process.env = { ...saved };
+  });
+
+  const post = (id: number, title: string, pub = 1, extra: Record<string, unknown> = {}) => ({ id, title, publication_id: pub, canonical_url: `https://example.substack.com/p/${id}`, audience: "everyone", ...extra });
+  const page = (posts: unknown[], extra: Record<string, unknown> = {}) => ({ posts, publications: [{ id: 1, name: "Example" }, { id: 2, name: "Paid Pub" }], inboxItems: [], postReactions: [], savedPosts: [], more: false, ...extra });
+  const routes = {
+    "https://substack.com/api/v1/user/profile/self": authed({
+      id: 42,
+      subscriptions: [
+        { membership_state: "free_signup", publication: { id: 1, name: "Example", subdomain: "example" } },
+        { membership_state: "subscribed", publication: { id: 2, name: "Paid Pub", subdomain: "paidpub" } },
+      ],
+    }),
+    "https://substack.com/api/v1/reader/posts?inboxType=seen&limit=20": authed(
+      page([post(10, "Finished essay", 2), post(11, "Half read"), post(12, "Bounced off")], {
+        inboxItems: [{ post_id: 10, max_read_progress: 0.95, seen_at: "2026-10-01T10:00:00Z" }, { post_id: 11, max_read_progress: 0.5 }, { post_id: 12, max_read_progress: 0.04 }],
+        postReactions: [{ post_id: 10, user_id: 42 }],
+        more: true,
+        cursor: "c2",
+      }),
+    ),
+    "https://substack.com/api/v1/reader/posts?inboxType=seen&limit=20&cursor=c2": authed(page([post(13, "Older read")], { inboxItems: [{ post_id: 13, max_read_progress: 1 }] })),
+    "https://substack.com/api/v1/reader/posts?inboxType=saved&limit=20": authed(page([post(20, "Saved for later")])),
+    "https://substack.com/api/v1/reader/posts?inboxType=archived&limit=20": authed(page([post(30, "$10k trade alert")])),
+    "https://substack.com/api/v1/reader/feed/profile/42?types=like": authed({
+      items: [{ type: "post", context: { type: "post_like" }, post: post(40, "Hearted post"), publication: { name: "Example" } }, { type: "comment", context: { type: "note_like" } }],
+      nextCursor: null,
+    }),
+  };
+
+  it("lists reading history with read progress, and saved and liked posts", async () => {
+    const client = await connect(routes);
+    const seen = JSON.parse(textOf(await client.callTool({ name: "get_reading_history", arguments: { limit: 10 } })));
+    expect(seen.items.map((p: { title: string; readProgress?: number }) => [p.title, p.readProgress])).toEqual([["Finished essay", 0.95], ["Half read", 0.5], ["Bounced off", 0.04], ["Older read", 1]]);
+    expect(seen.items[0]).toMatchObject({ publication: "Paid Pub", hearted: true, seenAt: "2026-10-01T10:00:00Z" });
+    expect(seen.nextCursor).toBeUndefined();
+    const savedPosts = JSON.parse(textOf(await client.callTool({ name: "get_saved_posts", arguments: {} })));
+    expect(savedPosts.items).toMatchObject([{ title: "Saved for later", saved: true, publication: "Example" }]);
+    const liked = JSON.parse(textOf(await client.callTool({ name: "get_liked_posts", arguments: {} })));
+    expect(liked.items.map((p: { title: string }) => p.title)).toEqual(["Hearted post"]);
+  });
+});

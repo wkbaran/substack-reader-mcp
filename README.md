@@ -9,10 +9,10 @@ An MCP server that gives Claude (and any other MCP client) access to your Substa
 ![Node 20+](https://img.shields.io/badge/node-20%2B-339933?logo=nodedotjs&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)
 ![MCP](https://img.shields.io/badge/MCP-stdio-6E56CF)
-![Tools](https://img.shields.io/badge/tools-13-informational)
+![Tools](https://img.shields.io/badge/tools-13%20%2B%204%20digest-informational)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 
-[Quick start](#quick-start) · [Other clients](#other-mcp-clients) · [Hermes digest](#daily-digest-with-hermes-agent) · [Tools](#tools) · [Logging in](#logging-in) · [Privacy and security](#privacy-and-security) · [Troubleshooting](#troubleshooting)
+[Quick start](#quick-start) · [Other clients](#other-mcp-clients) · [Tools](#tools) · [Hermes Agent](#hermes-agent) · [Logging in](#logging-in) · [Privacy and security](#privacy-and-security) · [Troubleshooting](#troubleshooting)
 
 </div>
 
@@ -123,13 +123,78 @@ claude mcp add --scope user substack-reader -- node /absolute/path/to/substack-r
 ```
 </details>
 
-## Daily digest with Hermes Agent
+## Tools
 
-[`hermes/`](hermes/) contains a skill for [Hermes Agent](https://github.com/NousResearch/hermes-agent) that turns this server into a scheduled Substack digest. Each morning it collects every post published since the last run in your subscriptions, plus chats and DMs with new activity. Subagents read every post in full, and it sends one message: the posts worth reading in full (with a two-line summary and why), everything else grouped by publication, and a summary of your chats that puts anything addressed to you first.
+Publications can be named loosely: by name (*"The Pragmatic Engineer"*), part of a name (*"pragmatic"*), subdomain, or URL. Posts can be given as any Substack link (`/p/slug`, `substack.com/home/post/p-123`, `open.substack.com/pub/…`) or a post ID.
 
-The model only does the judging. Everything deterministic is done by the server's digest tools, which are switched on by setting `SUBSTACK_DIGEST_DIR`: `digest_begin` fetches and dedups the posts and writes the work list, and `digest_finish` takes the model's summaries and picks, lays out the final message, and saves the state. The skill never touches a file.
+### Reading
 
-### Setup
+| Tool | What it returns |
+|---|---|
+| `auth_status` | Whether you're logged in, as whom, and whether Substack still accepts the session |
+| `list_subscriptions` | Every subscription, including ones hidden from your public profile, with URL and membership |
+| `get_feed` | Recent posts across all subscriptions, newest first. `since` takes `"7d"`, `"48h"` or a date |
+| `get_recent_posts` | Recent posts from one publication, with `offset` for paging back |
+| `search_posts` | Keyword search within one publication's archive |
+| `read_post` | A full post as Markdown (or `text` / `html`). Long posts are paged with `start`. A paid post you can't access is flagged as a preview |
+
+### Chat
+
+| Tool | What it returns |
+|---|---|
+| `list_chats` | Your chat inbox: publication chats you're in and direct messages. Substack's unread flags here aren't reliable |
+| `get_chat_activity` | Chats and DMs with activity since a time (`"24h"`, an ISO time), and with `transcripts` only the new messages |
+| `get_chat_threads` | Threads in a publication's chat, newest first, with reply counts. `before` pages back |
+| `read_chat_thread` | A thread with its replies and replies to replies, as a readable transcript |
+| `read_dm` | One direct-message conversation |
+
+### Digest (opt-in)
+
+Registered only when `SUBSTACK_DIGEST_DIR` is set. They're built for scheduled digests run by an agent harness such as [Hermes Agent](#hermes-agent) ([why](#why-this-server-has-tools-just-for-agent-harnesses)), and return plain text.
+
+| Tool | What it does |
+|---|---|
+| `digest_begin` | Fetches every post since the last digest (minus ones already reported) and the chats with new activity, saves the work list, and returns it with a run id and post refs (`P1`, `P2`, …). Doesn't change the state |
+| `digest_finish` | Takes the model's verdict on each post (`pick`, `other`, `unreadable`, with a gist) and chat, lays out the final message and saves the state. Same `run_id` twice is harmless; `dry_run` saves nothing |
+| `digest_status` | The last run, reported-post count, publications waiting to be re-checked, and recent runs (read-only) |
+| `mark_reported` | Manual repair: adds post URLs to the reported list and optionally sets `last_run` |
+
+With the digest tools on, `read_post` also accepts a ref from the current run (`P3`), and its header then includes a `Digest ref:` line.
+
+### Account changes
+
+| Tool | What it does |
+|---|---|
+| `subscribe` | Free-subscribes you to a publication. Never starts a paid plan; does nothing if you're already subscribed |
+| `unsubscribe` | Removes a **free** subscription. Paid subscriptions are refused, and an ambiguous name lists the matches instead of guessing |
+
+Apart from the digest tools, every tool except these two is marked read-only. These two are marked as changing your account, so MCP clients ask before running them, and `unsubscribe` is also marked destructive. After each change the server checks with Substack and reports what actually happened.
+
+## Hermes Agent
+
+[Hermes Agent](https://github.com/NousResearch/hermes-agent) is Nous Research's open-source, self-hosted agent harness: it runs skills on a schedule, hands work to subagents and delivers the results to chat platforms such as Discord. This section is written for Hermes, but it applies to any agent harness that works the same way. Nothing in the digest tools depends on Hermes; only [`hermes/SKILL.md`](hermes/SKILL.md) does.
+
+### Why this server has tools just for agent harnesses
+
+Everything above is a general MCP server that works in any client. A scheduled, unattended digest is a different job from a person asking questions in a chat: there's nobody to notice a mistake, every turn costs money, and the run ends the moment the model sends its last message. So the server has four extra [digest tools](#digest-opt-in), switched on by `SUBSTACK_DIGEST_DIR`, that take on everything that doesn't need judgment. Clients that don't set it see the general tools unchanged.
+
+What that buys:
+
+- **The model only judges.** Fetching, deduplication, rate-limit retries, time zones, laying out the message and saving state are code. They come out the same on every run and cost no tokens.
+- **State can't be lost.** `digest_finish` saves state before it returns the message, so a run that ends as soon as the agent replies has already saved. The agent needs no file tools at all. Before these tools, the sibling [Medium digest](https://github.com/wkbaran/medium-reader-mcp) once sent its digest and never saved state, and spent half of another run's budget on refused file writes.
+- **Summaries can't land on the wrong post.** `digest_begin` numbers the posts (`P1`, `P2`, …), and `read_post` and `digest_finish` take those refs. A subagent reads by ref, so even if the agent shuffles the numbers, each ref still fetches the post it names.
+- **Output fits the harness.** The tools return compact plain text under 40,000 characters, because Hermes wraps MCP results in JSON and stops passing results over about 50,000 characters to the model.
+- **Smaller models are enough.** Because code handles everything that needs to be exact, the whole Substack digest, main session and subagents, runs on a local 27B model.
+
+A general MCP server makes an account readable by any agent. A few tools shaped for how a harness actually runs make both the server and the harness much more effective than either is alone.
+
+### The daily digest
+
+[`hermes/`](hermes/) contains a skill that turns this server into a scheduled Substack digest. Each morning it collects every post published since the last run in your subscriptions, plus chats and DMs with new activity. Subagents read every post in full, and it sends one message: the posts worth reading in full (with a two-line summary and why), everything else grouped by publication, and a summary of your chats that puts anything addressed to you first.
+
+The model only does the judging. Everything deterministic is done by the digest tools: `digest_begin` fetches and dedups the posts and writes the work list, and `digest_finish` takes the model's summaries and picks, lays out the final message, and saves the state. The skill never touches a file.
+
+#### Setup
 
 1. **Build the server** on your machine (`npm ci && npm run build`). Copy `dist/`, `package.json` and `package-lock.json` to a directory the Hermes container can see (for example `$HERMES_HOME/mcp/substack-reader-mcp`, which is `/opt/data/mcp/substack-reader-mcp` inside the official image), and install the runtime dependencies there:
    ```bash
@@ -159,14 +224,14 @@ The model only does the judging. Everything deterministic is done by the server'
    ```
    Run `hermes cron` commands as the user the gateway runs as (`docker exec -u hermes …` in the official image), so the files it writes keep the right owner.
 
-### Customizing
+#### Customizing
 
 - **What gets picked:** `$SUBSTACK_DIGEST_DIR/interests.md` is free text that `digest_begin` passes to the model on every run (the first 4,000 characters). Describe what you want more of. Name topics and writers to rank up, and kinds of posts (link roundups, podcast notes) to rank down.
 - **Sizes:** the chunk size (5 posts per subagent) is a plain instruction in the skill. `digest_begin` takes `max_posts` (default 100); posts beyond it carry over to the next run.
 - **Output format:** the server lays out the message for Discord Markdown (`renderDigest` in `src/digest/render.ts`). `digest_finish` with `render: false` returns plain-text sections instead, for other destinations.
 - **Schedule and delivery:** use `hermes cron edit <job-id> --schedule "…"` or `--deliver …`.
 
-### Things to know
+#### Things to know
 
 - **Tool results over about 50,000 characters don't reach the model.** Hermes saves them to a file the model can't parse, and cron runs can't run scripts to help. The digest tools keep their output under 40,000 characters and as plain text (Hermes wraps MCP results in JSON, so JSON output would be escaped twice).
 - **Reads everything:** the skill reads every new post, which suits a few dozen posts a day. With many more subscriptions, have it shortlist first, the way the Medium digest does.
@@ -176,51 +241,6 @@ The model only does the judging. Everything deterministic is done by the server'
 - **Read-only:** the skill never uses the tools that change your account.
 - **Cost:** a test run made 12 model calls and took about 5 minutes on Claude Sonnet. Cost grows with the number of new posts, because every post is read in full.
 - **Your own account:** this server uses Substack's undocumented web API with your session cookies. A daily digest is light, read-only use, but if Substack objects to automated access, it's your account at risk.
-
-## Tools
-
-Publications can be named loosely: by name (*"The Pragmatic Engineer"*), part of a name (*"pragmatic"*), subdomain, or URL. Posts can be given as any Substack link (`/p/slug`, `substack.com/home/post/p-123`, `open.substack.com/pub/…`) or a post ID.
-
-### Reading
-
-| Tool | What it returns |
-|---|---|
-| `auth_status` | Whether you're logged in, as whom, and whether Substack still accepts the session |
-| `list_subscriptions` | Every subscription, including ones hidden from your public profile, with URL and membership |
-| `get_feed` | Recent posts across all subscriptions, newest first. `since` takes `"7d"`, `"48h"` or a date |
-| `get_recent_posts` | Recent posts from one publication, with `offset` for paging back |
-| `search_posts` | Keyword search within one publication's archive |
-| `read_post` | A full post as Markdown (or `text` / `html`). Long posts are paged with `start`. A paid post you can't access is flagged as a preview |
-
-### Chat
-
-| Tool | What it returns |
-|---|---|
-| `list_chats` | Your chat inbox: publication chats you're in and direct messages. Substack's unread flags here aren't reliable |
-| `get_chat_activity` | Chats and DMs with activity since a time (`"24h"`, an ISO time), and with `transcripts` only the new messages |
-| `get_chat_threads` | Threads in a publication's chat, newest first, with reply counts. `before` pages back |
-| `read_chat_thread` | A thread with its replies and replies to replies, as a readable transcript |
-| `read_dm` | One direct-message conversation |
-
-### Digest (opt-in)
-
-Registered only when `SUBSTACK_DIGEST_DIR` is set. They're built for the [Hermes digest](#daily-digest-with-hermes-agent) and return plain text.
-
-| Tool | What it does |
-|---|---|
-| `digest_begin` | Fetches every post since the last digest (minus ones already reported) and the chats with new activity, saves the work list, and returns it with a run id and post refs (`P1`, `P2`, …). Doesn't change the state |
-| `digest_finish` | Takes the model's verdict on each post (`pick`, `other`, `unreadable`, with a gist) and chat, lays out the final message and saves the state. Same `run_id` twice is harmless; `dry_run` saves nothing |
-| `digest_status` | The last run, reported-post count, publications waiting to be re-checked, and recent runs (read-only) |
-| `mark_reported` | Manual repair: adds post URLs to the reported list and optionally sets `last_run` |
-
-### Account changes
-
-| Tool | What it does |
-|---|---|
-| `subscribe` | Free-subscribes you to a publication. Never starts a paid plan; does nothing if you're already subscribed |
-| `unsubscribe` | Removes a **free** subscription. Paid subscriptions are refused, and an ambiguous name lists the matches instead of guessing |
-
-Apart from the digest tools, every tool except these two is marked read-only. These two are marked as changing your account, so MCP clients ask before running them, and `unsubscribe` is also marked destructive. After each change the server checks with Substack and reports what actually happened.
 
 ## Logging in
 

@@ -40,6 +40,21 @@ export interface RawPost {
 
 // ---- Normalized shapes returned to MCP clients ----
 
+/** A post from the reader's own shelves (seen, saved, archived), with what they did with it. */
+export interface ReaderPost extends PostSummary {
+  /** Furthest the reader got, 0–1 (Substack's max_read_progress); absent when Substack doesn't say. */
+  readProgress?: number;
+  /** When the reader opened it. */
+  seenAt?: string;
+  /** The reader hearted it. */
+  hearted?: boolean;
+  /** The reader saved it. */
+  saved?: boolean;
+}
+
+/** substack.com/inbox tabs, as `inboxType`: seen = opened in the reader, saved, archived = dismissed. */
+export type ReaderShelf = "seen" | "saved" | "archived";
+
 export interface Subscription {
   publicationId: number;
   name: string;
@@ -272,6 +287,56 @@ export class SubstackClient {
    * Free-subscribe the logged-in user to a publication. Idempotent: an existing
    * subscription (free or paid) is left untouched.
    */
+  /**
+   * The reader's own shelves on substack.com (the inbox's Seen, Saved and Archived tabs):
+   * `GET /api/v1/reader/posts?inboxType=…`, 20 a page, newest first, paged by an opaque
+   * cursor. Read-only: these GETs don't mark anything as seen.
+   */
+  async readerPosts(shelf: ReaderShelf, opts: { limit?: number; cursor?: string } = {}): Promise<{ items: ReaderPost[]; nextCursor?: string }> {
+    const limit = clamp(opts.limit ?? 50, 1, 500);
+    const items: ReaderPost[] = [];
+    let cursor = opts.cursor;
+    for (let page = 0; page < 30 && items.length < limit; page++) {
+      const q = new URLSearchParams({ inboxType: shelf, limit: "20", ...(cursor ? { cursor } : {}) });
+      const r = await this.http.getJson<RawReaderPage>(`https://substack.com/api/v1/reader/posts?${q}`, { requireAuth: true });
+      const pubs = new Map((r.publications ?? []).map((x) => [x.id, x.name]));
+      const progress = new Map((r.inboxItems ?? []).map((x) => [x.post_id, x]));
+      const hearted = new Set((r.postReactions ?? []).map((x) => x.post_id));
+      const saved = new Set((r.savedPosts ?? []).map((x) => x.post_id));
+      for (const p of r.posts ?? []) {
+        const inbox = progress.get(p.id);
+        items.push({
+          ...summarize(p, p.publication_id !== undefined ? pubs.get(p.publication_id) : undefined),
+          ...(typeof inbox?.max_read_progress === "number" ? { readProgress: Math.round(inbox.max_read_progress * 100) / 100 } : {}),
+          ...(inbox?.seen_at ? { seenAt: inbox.seen_at } : {}),
+          ...(hearted.has(p.id) ? { hearted: true } : {}),
+          ...(saved.has(p.id) || shelf === "saved" ? { saved: true } : {}),
+        });
+      }
+      cursor = r.more && r.cursor ? r.cursor : undefined;
+      if (!cursor || !r.posts?.length) break;
+    }
+    return { items, ...(cursor ? { nextCursor: cursor } : {}) };
+  }
+
+  /** Posts the reader hearted (their profile's Likes tab, post likes only; note likes are skipped). */
+  async likedPosts(opts: { limit?: number; cursor?: string } = {}): Promise<{ items: PostSummary[]; nextCursor?: string }> {
+    const limit = clamp(opts.limit ?? 50, 1, 500);
+    const me = await this.http.getJson<{ id: number }>("https://substack.com/api/v1/user/profile/self", { requireAuth: true });
+    const items: PostSummary[] = [];
+    let cursor = opts.cursor;
+    for (let page = 0; page < 30 && items.length < limit; page++) {
+      const q = new URLSearchParams({ types: "like", ...(cursor ? { cursor } : {}) });
+      const r = await this.http.getJson<RawProfileFeed>(`https://substack.com/api/v1/reader/feed/profile/${me.id}?${q}`, { requireAuth: true });
+      for (const it of r.items ?? []) {
+        if (it.type === "post" && it.post) items.push(summarize(it.post, it.publication?.name));
+      }
+      cursor = r.nextCursor ?? undefined;
+      if (!cursor || !r.items?.length) break;
+    }
+    return { items: items.slice(0, limit), ...(cursor ? { nextCursor: cursor } : {}) };
+  }
+
   async subscribe(publication: string): Promise<SubscriptionChange> {
     const pub = await this.publicationInfo(publication);
     const existing = await this.subscriptionState(pub.id);
@@ -473,6 +538,21 @@ export function normalizeSubscriptions(subs: RawSubscription[], pubs: RawPublica
     });
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+interface RawReaderPage {
+  posts?: RawPost[];
+  publications?: Array<{ id: number; name?: string }>;
+  inboxItems?: Array<{ post_id?: number; max_read_progress?: number; seen_at?: string | null }>;
+  postReactions?: Array<{ post_id?: number; user_id?: number }>;
+  savedPosts?: Array<{ post_id?: number }>;
+  more?: boolean;
+  cursor?: string;
+}
+
+interface RawProfileFeed {
+  items?: Array<{ type?: string; context?: { type?: string }; post?: RawPost | null; publication?: { name?: string } | null }>;
+  nextCursor?: string | null;
 }
 
 export function summarize(p: RawPost, publication?: string): PostSummary {

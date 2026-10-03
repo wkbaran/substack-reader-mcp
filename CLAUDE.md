@@ -35,12 +35,17 @@ Common mistakes and confusion points in this project. Add to this list when some
 - **Archive requests get rate-limited.** At 6 concurrent archive requests with 500 ms / 1 s backoff, 7 of 35 publications failed with 429 on 2026-10-02, and 20 failed on each of two calls 17 s apart on 09-26. Now: concurrency 3, 429 backoff 2/5/10 s with jitter, then retry passes after 15 s and 30 s, one publication at a time. No numbers are published (see above), so these are guesses that worked.
 - **Don't open chat pages in a browser to investigate.** Loading `substack.com/chat` makes the page `POST /api/v1/messages/inbox/seen`, which clears the user's unread badges. The API GETs above don't do that (as far as observed). This happened once, on 2026-09-25.
 
+- **Reader shelves (found 2026-10-03 in the web app's public JS bundles, checked live):** `GET substack.com/api/v1/reader/posts?inboxType=<seen|saved|archived|inbox|recommended>&limit=20[&cursor=…]` returns `{posts, publications, inboxItems, postReactions, savedPosts, more, cursor}`. The `posts` lack publication names, which come from `publications` by `publication_id`. `inboxItems[].max_read_progress` (0–1) says how far the user read in the web or app reader; email reads don't appear. `postReactions` are the user's own hearts, and `inboxType=archived` is posts the user dismissed. Likes: `GET /api/v1/reader/feed/profile/<userId>?types=like` returns `{items, nextCursor}`, where `type: "post"` with `context.type: "post_like"` is a hearted post and `"comment"/"note_like"` is a liked note (skipped).
+- **Endpoints that look read-only but write:** `/api/v1/posts/saved` is only save (POST) and unsave (DELETE); list saved posts with `inboxType=saved` instead. `/api/v1/posts/<id>/seen`, `/api/v1/reader/feed/<key>/seen`, `/api/v1/inbox/seen` and `/api/v1/reader/feed/<key>/dismiss` change inbox state. Never call them. The GETs above don't mark anything.
+
 ## MCP / Claude Code
 
 - In server mode **stdout is the MCP protocol channel.** Never `console.log` from server code paths; use `console.error`. CLI subcommands (`status`, `logout`, `install`) may use stdout.
 - Claude Code does **not** read MCP servers from `~/.claude/settings.json`. The original Python version's `make configure` wrote them there, so that registration never took effect. Use `claude mcp add` (what `cli.ts install` does) or `~/.claude.json` / `.mcp.json`.
 
 ## Tooling
+
+- **The version is in two places:** `package.json` and `VERSION` in `src/server.ts` (what MCP clients see in `serverInfo`). Bump both.
 
 - TypeScript is 7.x, the native compiler. Some older tsconfig options (`baseUrl`, `moduleResolution: node`) no longer exist.
 - If vitest fails with `Cannot find native binding` (rolldown), it's the npm optional-dependency bug: delete `node_modules` and `package-lock.json`, then run `npm install` again.
@@ -61,3 +66,14 @@ Common mistakes and confusion points in this project. Add to this list when some
 
 - `hermes/SKILL.md` is the generic, shareable copy of the digest skill; its settings are in the Settings block at the top. Since v3.0.0 it uses only the digest tools, `get_chat_activity`, `read_post` and `delegate_task`, and must not use file tools. The copy running on the maintainer's Hermes host has those values filled in, and the two are kept in sync by hand. When you change one, change the other, and bump `version` in the frontmatter.
 - The skill is a prompt, so it can't be unit-tested. Check changes by running the cron job once (`hermes cron run <id>`) and reading the tool calls in Hermes's `state.db` `messages` table. That's how the result-size and missing-`since` problems were found.
+
+## Headline classifier (`src/classifier/`, `tools/classifier/`)
+
+- **Shared with medium-reader-mcp.** `src/classifier/*` and `tools/classifier/{lib,collect,label,score,analyze}.mjs` are identical in both repos; only `tools/classifier/source.mjs` differs. Change both copies together, and keep `src/classifier/` free of Substack imports. docs/classifier.md explains the design; the evaluation behind it is in medium-reader-mcp's `experiments/jev/`.
+- **Off by default here** (`classifierFromEnv("SUBSTACK", …, "off")`), unlike Medium, where `sampling` is the default. The Substack digest has always read every post, so turning a classifier on must be a choice. When it's off, `digest_begin`'s output is exactly what it was before (no CLASSIFIER line, no rank column).
+- **What the classifier changes:** POSTS are sorted by rank with a rank column. Skipped posts (`skip ≥ SUBSTACK_DIGEST_SKIP_THRESHOLD`) and below-floor posts (`SUBSTACK_DIGEST_RANK_FLOOR`) get their own lists. `reconcile` doesn't count them as missing: skipped ones go in the 🗑 line, and unread low ones under 📎 "Also new". All of them are still saved as reported.
+- **The classifier's deadline is real time.** `digestBegin` hands it `Date.now() + time left`, not `fetchStart + budget`, because tests inject `deps.now` and the classifier uses the real clock. A timestamp on the injected clock made it give up at once ("no time left to classify").
+- **`runs/` archive:** `digest_finish` saves each committed run as `runs/<run_id>.json` with `judged: {picks, others}` (newest 14, `archiveRun` in state.ts). Nothing in the digest reads it; it's history for `tools/classifier/collect.mjs`. A failed archive write never fails the run.
+- `interests.md` sections are parsed by `parseProfile` (`## Interests`, `## Skip`; a file without them is all interests). The model still sees the raw file in INTERESTS.
+- `OPENROUTER_API_KEY` for the tools can live in `.env` (gitignored); run them with `node --env-file=.env`.
+- **interests_evidence / save_interests_proposal:** `src/classifier/{evidence,proposal}.ts` are shared with Medium. `src/digest/evidence.ts` is Substack's gatherer. Labels and the dataset live in `<digest dir>/classifier/`, and runs in `runs/`; they're read through `subdirPath`, which refuses symlinks, since `safePath` only takes flat names. Proposals are tested on held-out labels: `isTrainLabel` and `analyze.mjs --test-half` share one split.

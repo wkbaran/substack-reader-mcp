@@ -3,6 +3,7 @@ import type { RunFile, RunPost } from "./collect.js";
 import { reconcile, renderDigest, renderStatus, type ChatJudgment, type PostJudgment, type Reconciled } from "./render.js";
 import {
   addReported,
+  archiveRun,
   atomicWrite,
   FILES,
   laterOf,
@@ -162,6 +163,12 @@ export async function digestFinish(dir: string, args: FinishArgs, { now = Date.n
     } catch {
       // State is saved; runs[] in state.json still makes a repeat call harmless.
     }
+    try {
+      const judged = { picks: rec.picks.map((e) => e.post.ref), others: rec.others.map((e) => e.post.ref) };
+      await archiveRun(dir, current.run_id, JSON.stringify({ ...current, committed_at: committedAt, judged }, null, 2) + "\n");
+    } catch {
+      // Only history for the classifier tools; never fails a run.
+    }
     return { text };
   };
   return args.dryRun ? work() : withLock(dir, work);
@@ -170,7 +177,8 @@ export async function digestFinish(dir: string, args: FinishArgs, { now = Date.n
 function compose(saved: string, run: RunFile, rec: Reconciled, warnings: string[], message: string, markdown: boolean): string {
   const notChecked = run.publications.filter((p) => p.outcome === "failed" || p.outcome === "overflow").length;
   const counts =
-    `COUNTS: ${run.posts.length} posts (${rec.picks.length} picks, ${rec.others.length} other, ${rec.unreadable.length} couldn't read, ${rec.missing.length} not summarized), ` +
+    `COUNTS: ${run.posts.length} posts (${rec.picks.length} picks, ${rec.others.length} other, ${rec.unreadable.length} couldn't read, ${rec.missing.length} not summarized` +
+    `${rec.skipped.length ? `, ${rec.skipped.length} skipped` : ""}${rec.unread.length ? `, ${rec.unread.length} ranked low and unread` : ""}), ` +
     `${run.chats.length} chats, ${notChecked} publications not checked, ${run.give_ups.length} given up`;
   const warn = warnings.length ? `WARNINGS:\n${warnings.map((w) => `- ${w}`).join("\n")}` : "WARNINGS: none";
   const marker = markdown ? DIGEST_MARKER : "===== SECTIONS (plain text) =====";

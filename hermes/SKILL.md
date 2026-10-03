@@ -1,7 +1,7 @@
 ---
 name: substack-digest
 description: Digest of every new Substack post and chat activity since the last run, each post read in full by subagents, with picks worth reading deeply. Uses the substack-reader MCP server's digest tools.
-version: 3.1.0
+version: 3.2.0
 platforms: [linux]
 metadata:
   hermes:
@@ -34,10 +34,11 @@ Scheduled (cron) or on request: "what's new on Substack", "Substack digest", "an
 Call `digest_begin` with no arguments.
 - If it reports an auth problem ("Authentication required", "Not logged in", "session was rejected"), stop and reply with only: "📬 Substack digest skipped — session expired. <REAUTH>"
 - Otherwise it returns plain text: a `RUN_ID`, one line per new post (`P1 | title | publication | date | access | type | url`), the chats with activity (`C1 | chat id | name | activity | get_chat_activity arguments`), the user's interests, and a `NEXT:` line. Keep the `RUN_ID`; you need it in step 5.
-- Don't filter or pre-rank posts. Every post listed gets read.
+- If the server's headline classifier is on, there's a `CLASSIFIER:` line, the POSTS lines carry a rank from 0 to 100 after the ref and are sorted best first, and there may be two more lists: **SKIPPED BY CLASSIFIER** (don't read these, and give them no entry) and **RANKED LOW** (read them only if every chunk under POSTS is done; posts without an entry are listed as "Also new").
+- Don't filter or re-rank the POSTS list yourself. Every post under POSTS gets read.
 
 ### 2. Read every post, in batches of subagents
-Split the posts into chunks of **5**. Call `delegate_task` with `tasks=[…]` of **at most `MAX_PARALLEL` tasks per call**, and keep calling it until every chunk is done. For example, 23 posts make 5 chunks, which take 3 `delegate_task` calls with `MAX_PARALLEL` 2.
+Split the posts listed under POSTS (not the skipped or ranked-low ones) into chunks of **5**, in the order listed. Call `delegate_task` with `tasks=[…]` of **at most `MAX_PARALLEL` tasks per call**, and keep calling it until every chunk is done. For example, 23 posts make 5 chunks, which take 3 `delegate_task` calls with `MAX_PARALLEL` 2.
 
 Give each task this goal, with its refs listed. **List only the refs, exactly as `digest_begin` numbered them (for example `P6, P7, P8, P9, P10`).** Don't renumber them, and don't add titles or URLs: `read_post` looks each ref up on the server, so a ref always fetches the post it names.
 
@@ -70,7 +71,7 @@ If `digest_begin` listed chats with activity, send one more `delegate_task` batc
 
 ### 4. Rank
 Choose the **picks** ("Read in full") from the post blocks:
-- Start with DEPTH 4–5. Rank up posts that match the interests from `digest_begin` (and anything you remember about the user), and posts that appear in a chat's POSTS_DISCUSSED.
+- Start with DEPTH 4–5. Rank up posts that match the interests from `digest_begin` (and anything you remember about the user), posts with a high classifier rank, and posts that appear in a chat's POSTS_DISCUSSED.
 - Rank down link-roundups, announcements and podcast-notes, whatever their DEPTH.
 - Rank down posts whose ACCESS is `preview-only`: a gist of a teaser isn't a reason to read the whole post.
 - At most 2 picks per publication. Usually 3–7 picks; on a genuinely strong day, more. If nothing is strong, pick none rather than padding.

@@ -137,6 +137,10 @@ Publications can be named loosely: by name (*"The Pragmatic Engineer"*), part of
 | `get_recent_posts` | Recent posts from one publication, with `offset` for paging back |
 | `search_posts` | Keyword search within one publication's archive |
 | `read_post` | A full post as Markdown (or `text` / `html`). Long posts are paged with `start`. A paid post you can't access is flagged as a preview |
+| `get_reading_history` | Posts you've opened on substack.com or in the app, most recent first, with **how far you read each one** (0–1), and whether you hearted or saved it. Posts read only by email don't appear |
+| `get_saved_posts` | Posts you saved for later |
+| `get_liked_posts` | Posts you hearted |
+| `interests_evidence` | What your own activity says about your taste (paid and free subscriptions, saves, hearts, what you finished or abandoned, what you dismissed, and with the digest on, its picks and your labels), with rules for drafting an `interests.md` from it. See [Proposing an interests.md](docs/classifier.md#proposing-an-interestsmd-from-your-activity) |
 
 ### Chat
 
@@ -212,6 +216,8 @@ The model only does the judging. Everything deterministic is done by the digest 
          SUBSTACK_READER_HOME: /opt/data/mcp/substack-reader-home
          SUBSTACK_DIGEST_DIR: /opt/data/sandbox/substack_digest
          SUBSTACK_DIGEST_TZ: America/Denver
+         # SUBSTACK_CLASSIFIER: jev       # optional ranking classifier; see "Headline classifier"
+         # OPENROUTER_API_KEY: sk-or-…
    ```
    `SUBSTACK_DIGEST_DIR` must be an absolute path the server's user can write. The server creates it if needed and keeps `state.json`, the run files and a lock file there. `SUBSTACK_DIGEST_TZ` is the IANA time zone for times shown in the digest (default UTC).
 4. **Install the skill:** copy `hermes/SKILL.md` to `$HERMES_HOME/skills/productivity/substack-digest/SKILL.md`, and `hermes/substack_digest_start.sh` to `$HERMES_HOME/scripts/`. Optionally, copy `hermes/interests.example.md` to `$SUBSTACK_DIGEST_DIR/interests.md` and edit it (see below).
@@ -226,7 +232,7 @@ The model only does the judging. Everything deterministic is done by the digest 
 
 #### Customizing
 
-- **What gets picked:** `$SUBSTACK_DIGEST_DIR/interests.md` is free text that `digest_begin` passes to the model on every run (the first 4,000 characters). Describe what you want more of. Name topics and writers to rank up, and kinds of posts (link roundups, podcast notes) to rank down.
+- **What gets picked:** `$SUBSTACK_DIGEST_DIR/interests.md` is text that `digest_begin` passes to the model on every run (the first 4,000 characters). Describe what you want more of under `## Interests`, and kinds of posts you never want under `## Skip` (see `hermes/interests.example.md`; a file without headings still works). With the [headline classifier](#headline-classifier) on, posts are also ranked against it before anything is read, and you can check the file against your own judgments with the tuning tools.
 - **Sizes:** the chunk size (5 posts per subagent) is a plain instruction in the skill. `digest_begin` takes `max_posts` (default 100); posts beyond it carry over to the next run.
 - **Output format:** the server lays out the message for Discord Markdown (`renderDigest` in `src/digest/render.ts`). `digest_finish` with `render: false` returns plain-text sections instead, for other destinations.
 - **Schedule and delivery:** use `hermes cron edit <job-id> --schedule "…"` or `--deliver …`.
@@ -234,13 +240,23 @@ The model only does the judging. Everything deterministic is done by the digest 
 #### Things to know
 
 - **Tool results over about 50,000 characters don't reach the model.** Hermes saves them to a file the model can't parse, and cron runs can't run scripts to help. The digest tools keep their output under 40,000 characters and as plain text (Hermes wraps MCP results in JSON, so JSON output would be escaped twice).
-- **Reads everything:** the skill reads every new post, which suits a few dozen posts a day. With many more subscriptions, have it shortlist first, the way the Medium digest does.
-- **State:** `digest_finish` records every post in the run in `$SUBSTACK_DIGEST_DIR/state.json` (the newest 500 URLs), so posts never repeat, including ones that couldn't be read. Writes are atomic and locked. `digest_begin` writes only `current_run.json`, so a run that dies before `digest_finish` saves nothing and the next run covers the same period. `last_run` is the server's clock when `digest_begin` started fetching. Use `digest_status` to inspect the state and `mark_reported` to repair it; don't edit the file while a run is going.
+- **Reads everything:** the skill reads every new post, which suits a few dozen posts a day. With many more subscriptions, turn on the [headline classifier](#headline-classifier) and set a rank floor, so low-ranked posts become optional.
+- **State:** `digest_finish` records every post in the run in `$SUBSTACK_DIGEST_DIR/state.json` (the newest 500 URLs), so posts never repeat, including ones that couldn't be read. Writes are atomic and locked. `digest_begin` writes only `current_run.json`, so a run that dies before `digest_finish` saves nothing and the next run covers the same period. A committed run is also kept as `runs/<run_id>.json` (the newest 14), as history for the classifier tools. `last_run` is the server's clock when `digest_begin` started fetching. Use `digest_status` to inspect the state and `mark_reported` to repair it; don't edit the file while a run is going.
 - **Rate limits:** Substack answers 429 when it's asked for too many archives at once. `digest_begin` fetches 3 publications at a time, backs off 2, 5 and 10 seconds on a 429, and tries failed publications again after 15 and 30 seconds, within about 140 seconds in all (Hermes gives an MCP call 300). A publication that still fails is listed under "⚠ Couldn't check" and fetched from the same point next run; after 7 days the digest gives up on that period and says so.
 - **Chats:** Substack's unread flags for chats are never set, so the digest uses activity since the last run instead: a thread counts when it was created or replied to after `last_run`. Only the first few pages of each chat's threads are checked, so a reply to a very old thread can be missed.
 - **Read-only:** the skill never uses the tools that change your account.
 - **Cost:** a test run made 12 model calls and took about 5 minutes on Claude Sonnet. Cost grows with the number of new posts, because every post is read in full.
 - **Your own account:** this server uses Substack's undocumented web API with your session cookies. A daily digest is light, read-only use, but if Substack objects to automated access, it's your account at risk.
+
+## Headline classifier
+
+An optional step before anything is read: a classifier **ranks** every new post's headline against your `interests.md` and **sets aside** the ones that clearly match your Skip section. The digest still reads every post under POSTS, but in rank order, with the rank in hand when picking "Read in full". Skipped posts aren't read at all, and posts below an optional rank floor are read only if there's time. It's the part of the digest that encodes your taste, so it's a separate, swappable component (`src/classifier/`, shared with medium-reader-mcp).
+
+- **Off by default.** Set `SUBSTACK_CLASSIFIER=jev` and `OPENROUTER_API_KEY` for [Jev](docs/jev/README.md), a decision model on OpenRouter that ranks and skips in a few seconds for about $0.03 per 1,000 posts. `sampling` (the MCP client's own model) can skip but not rank.
+- **A first draft from your activity:** ask your agent to "propose an interests.md from my Substack activity". `interests_evidence` gathers what you pay for, save, heart, finish and dismiss, and `save_interests_proposal` saves the draft as `interests.proposed.md` beside your current file (or use `tools/classifier/propose.mjs`).
+- **Tuning it to you:** `tools/classifier/` collects posts from your committed runs, lets you label them with one keypress each (`label.mjs`), scores them with the server's own classifier code, and analyzes the result (`analyze.mjs`). That gives recommended thresholds and the posts where your labels and `interests.md` disagree most, which is what to edit.
+
+How it works, the setup, the tuning loop step by step, and how to add a backend: **[docs/classifier.md](docs/classifier.md)**.
 
 ## Logging in
 
@@ -319,8 +335,11 @@ src/
   digest/collect.ts      digest_begin: fetch, dedup, write the run file
   digest/finish.ts       digest_finish, digest_status, mark_reported
   digest/render.ts       matching the model's verdicts to the run; the digest message
-  digest/state.ts        state.json v2, atomic writes, the lock file
+  digest/state.ts        state.json v2, atomic writes, the lock file, the runs/ archive
+  classifier/            headline classifier (docs/classifier.md): types.ts (the interface),
+                         jev.ts (Jev via OpenRouter), sampling.ts (MCP sampling), index.ts (backend from env)
   time.ts                relative times and time-zone formatting
+tools/classifier/        label, score and analyze your own posts (docs/classifier.md)
 test/                    one file per module, plus an in-memory MCP client test
 ```
 

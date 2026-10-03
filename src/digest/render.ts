@@ -45,8 +45,12 @@ export interface Reconciled {
   picks: PostEntry[];
   others: PostEntry[];
   unreadable: PostEntry[];
-  /** Posts the model didn't return an entry for. */
+  /** Posts the model didn't return an entry for (excluding the two lists below). */
   missing: RunPost[];
+  /** Skipped by the classifier, with no entry: counted in the 🗑 line. */
+  skipped: RunPost[];
+  /** Ranked below the floor, with no entry: listed under "Also new". */
+  unread: RunPost[];
   chats: ChatEntry[];
   /** Chats the model didn't return an entry for. */
   missingChats: RunChat[];
@@ -85,7 +89,9 @@ export function reconcile(run: RunFile, posts: PostJudgment[], chats: ChatJudgme
   });
 
   const ordered = [...chosen.values()].sort((a, b) => a.order - b.order).map((c) => c.entry);
-  const missing = run.posts.filter((p) => !chosen.has(p));
+  const skipped = run.posts.filter((p) => !chosen.has(p) && p.skipped);
+  const unread = run.posts.filter((p) => !chosen.has(p) && p.low && !p.skipped);
+  const missing = run.posts.filter((p) => !chosen.has(p) && !p.skipped && !p.low);
   if (missing.length) {
     warnings.push(`${missing.length} post${missing.length === 1 ? " has" : "s have"} no entry (${missing.map((p) => p.ref).join(", ")}); listed under "Couldn't read" as not summarized.`);
   }
@@ -109,6 +115,8 @@ export function reconcile(run: RunFile, posts: PostJudgment[], chats: ChatJudgme
     others: ordered.filter((e) => e.section === "other"),
     unreadable: ordered.filter((e) => e.section === "unreadable"),
     missing,
+    skipped,
+    unread,
     chats: run.chats.filter((c) => chatEntries.has(c)).map((c) => chatEntries.get(c)!),
     missingChats,
     warnings,
@@ -217,6 +225,11 @@ export function renderDigest(run: RunFile, rec: Reconciled, { markdown = true }:
     }
   }
 
+  if (rec.unread.length) {
+    out.push("", `📎 ${b("Also new")} ${i("(ranked low, not read)")}`);
+    for (const p of rec.unread) out.push(`• ${p.title} — ${p.publication}${p.paywalled ? " [paid]" : ""} ${p.url}`);
+  }
+
   if (nChats > 0) {
     out.push("", `💬 ${b("Chats")}`);
     const forUser = rec.chats.filter((c) => c.forUser);
@@ -241,6 +254,13 @@ export function renderDigest(run: RunFile, rec: Reconciled, { markdown = true }:
       );
     }
     for (const g of run.give_ups) out.push(`• Giving up on ${g.name} posts from ${dayRange(g.from, g.to, tz)} (${g.error ?? "error"})`);
+  }
+
+  if (rec.skipped.length) {
+    const pubs = new Map<string, number>();
+    for (const p of rec.skipped) pubs.set(p.publication, (pubs.get(p.publication) ?? 0) + 1);
+    const mostly = [...pubs].filter(([, n]) => n >= 3).sort((a, b) => b[1] - a[1]).map(([name]) => name);
+    out.push("", `🗑 Skipped ${rec.skipped.length} by the classifier${mostly.length ? ` (mostly ${mostly.slice(0, 3).join(", ")})` : ""}`);
   }
 
   let text = out.join("\n");

@@ -56,3 +56,22 @@ export function isValidTimeZone(tz: string): boolean {
     return false;
   }
 }
+
+// ---- headline classifier (optional; see docs/classifier.md) ----
+
+function envNumber(name: string, fallback: number, min: number, max: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= min && n <= max ? n : fallback;
+}
+
+/** Posts the classifier gives a skip probability at or above this are dropped (SUBSTACK_DIGEST_SKIP_THRESHOLD). */
+export function digestSkipThreshold(): number {
+  return envNumber("SUBSTACK_DIGEST_SKIP_THRESHOLD", 0.7, 0, 1);
+}
+
+/** Posts ranked below this are listed apart and reading them is optional (SUBSTACK_DIGEST_RANK_FLOOR; 0 = off). */
+export function digestRankFloor(): number {
+  return envNumber("SUBSTACK_DIGEST_RANK_FLOOR", 0, 0, 1);
+}

@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { classifySafely, parseProfile, type Classifier } from "../classifier/index.js";
 import { normalizePostUrl, type PostSummary, type SubstackClient, type Subscription } from "../substack/api.js";
 import { SubstackChat, type ChatActivity } from "../substack/chat.js";
 import { AuthError } from "../substack/http.js";
@@ -18,6 +19,28 @@ export interface RunPost {
   date?: string;
   paywalled: boolean;
   type?: string;
+  subtitle?: string;
+  author?: string;
+  /** The classifier's rank, 0–1 (higher = more wanted), when the backend ranks. */
+  rank?: number;
+  /** The classifier's skip probability, 0–1. */
+  skip?: number;
+  /** Skip ≥ threshold: listed apart, needs no entry in digest_finish, counted in the 🗑 line. */
+  skipped?: boolean;
+  /** Ranked below the rank floor: listed apart, an entry is optional; unread ones go under "Also new". */
+  low?: boolean;
+}
+
+/** What the headline classifier did in this run. */
+export interface RunClassifier {
+  status: "ok" | "partial" | "unavailable" | "off";
+  classifier: string;
+  detail?: string;
+  threshold: number;
+  floor: number;
+  ranked: number;
+  skipped: number;
+  low: number;
 }
 
 export interface RunChat {
@@ -68,6 +91,8 @@ export interface RunFile {
   max_posts: number;
   /** Posts that didn't fit in max_posts; their publications are carried. */
   overflow_posts: number;
+  /** Absent in runs from before the classifier existed. */
+  classifier?: RunClassifier;
   warnings: string[];
 }
 
@@ -87,6 +112,13 @@ export interface BeginDeps {
   sleep?: (ms: number) => Promise<void>;
   /** Time allowed for fetching posts (default 140 s, leaving room for chats in Hermes's 300 s tool timeout). */
   budgetMs?: number;
+  /** The headline classifier (default: none). */
+  classifier?: Classifier;
+  /** Skip threshold and rank floor (defaults 0.7 and 0 = off). */
+  threshold?: number;
+  rankFloor?: number;
+  /** Everything, classifying included, must finish by this long after fetching starts (default 250 s). */
+  totalBudgetMs?: number;
 }
 
 const INTERESTS_MAX = 4000;
@@ -154,6 +186,8 @@ export async function digestBegin(deps: BeginDeps, opts: BeginOptions = {}): Pro
     date: post.date,
     paywalled: post.paywalled,
     type: post.type,
+    ...(post.subtitle ? { subtitle: post.subtitle } : {}),
+    ...(post.author ? { author: post.author } : {}),
   }));
 
   const publications: RunPublication[] = results.map((r) => {
@@ -198,8 +232,9 @@ export async function digestBegin(deps: BeginDeps, opts: BeginOptions = {}): Pro
   }
 
   let interests = "";
+  let interestsFull = "";
   try {
-    interests = (await readDigestFile(deps.dir, FILES.interests))?.trim() ?? "";
+    interestsFull = interests = (await readDigestFile(deps.dir, FILES.interests))?.trim() ?? "";
     if (interests.length > INTERESTS_MAX) {
       interests = interests.slice(0, INTERESTS_MAX) + "\n[interests.md truncated]";
       warnings.push(`interests.md is longer than ${INTERESTS_MAX} characters; only the start is used.`);
@@ -207,6 +242,10 @@ export async function digestBegin(deps: BeginDeps, opts: BeginOptions = {}): Pro
   } catch (err) {
     warnings.push(`Couldn't read interests.md: ${err instanceof Error ? err.message : String(err)}`);
   }
+
+  // The classifier keeps real time, so hand it the time left rather than a timestamp on deps.now's clock.
+  const left = fetchStart + (deps.totalBudgetMs ?? 250_000) - now();
+  const classifier = deps.classifier && deps.classifier.name !== "off" ? await classifyPosts(posts, interestsFull, deps.classifier, deps, Date.now() + left) : undefined;
 
   const run: RunFile = {
     version: 1,
@@ -223,6 +262,7 @@ export async function digestBegin(deps: BeginDeps, opts: BeginOptions = {}): Pro
     give_ups: giveUps,
     max_posts: maxPosts,
     overflow_posts: dropped.length,
+    ...(classifier ? { classifier } : {}),
     warnings,
   };
 
@@ -242,6 +282,54 @@ export async function digestBegin(deps: BeginDeps, opts: BeginOptions = {}): Pro
   return { text: renderBegin(run, interests), run };
 }
 
+/** Rank and skip-check every post's headline against interests.md. Never throws. */
+async function classifyPosts(posts: RunPost[], interests: string, c: Classifier, deps: BeginDeps, deadline: number): Promise<RunClassifier> {
+  const threshold = deps.threshold ?? 0.7;
+  const floor = c.ranks ? (deps.rankFloor ?? 0) : 0;
+  const out: RunClassifier = { status: "ok", classifier: c.name, threshold, floor, ranked: 0, skipped: 0, low: 0 };
+  const profile = parseProfile(interests);
+  if (!posts.length) return { ...out, status: "off", detail: "nothing to rate" };
+  if (!profile.interests && !profile.skip) return { ...out, status: "off", detail: "no interests.md" };
+  const result = await classifySafely(
+    c,
+    posts.map((p) => ({ title: p.title, subtitle: p.subtitle, author: p.author, publication: p.publication })),
+    profile,
+    { deadline },
+  );
+  if (result.unavailable) return { ...out, status: "unavailable", detail: result.unavailable };
+  result.verdicts.forEach((v, n) => {
+    if (!v) return;
+    const p = posts[n]!;
+    if (v.skip !== undefined) {
+      p.skip = v.skip;
+      if (v.skip >= threshold) {
+        p.skipped = true;
+        out.skipped++;
+      }
+    }
+    if (v.rank !== undefined) {
+      p.rank = v.rank;
+      out.ranked++;
+      if (!p.skipped && floor > 0 && v.rank < floor) {
+        p.low = true;
+        out.low++;
+      }
+    }
+  });
+  return result.notes.length ? { ...out, status: "partial", detail: result.notes.join("; ") } : out;
+}
+
+export function classifierLine(c: RunClassifier | undefined): string | undefined {
+  if (!c) return undefined;
+  const pct = (n: number) => `${Math.round(n * 100)}%`;
+  if (c.status === "off") return `CLASSIFIER: ${c.classifier} off (${c.detail}); nothing skipped`;
+  if (c.status === "unavailable") return `CLASSIFIER: ${c.classifier} unavailable (${c.detail}); nothing skipped`;
+  const parts = [`${c.skipped} skipped (threshold ${pct(c.threshold)})`];
+  if (c.ranked) parts.unshift(`${c.ranked} ranked`);
+  if (c.floor) parts.push(`${c.low} below rank floor ${pct(c.floor)}`);
+  return `CLASSIFIER: ${c.classifier}: ${parts.join(" · ")}${c.status === "partial" ? `; ${c.detail}` : ""}`;
+}
+
 export function newRunId(at: number): string {
   return `${isoSeconds(at).replace(/[-:]/g, "").replace("T", "-").replace("Z", "")}-${randomBytes(2).toString("hex")}`;
 }
@@ -259,16 +347,34 @@ export function renderBegin(run: RunFile, interests: string): string {
     "",
   ];
 
-  if (run.posts.length) {
-    lines.push("POSTS (ref | title | publication | date | access | type | url):");
-    const titleMax = run.posts.length > 120 ? 80 : 140;
-    for (const p of run.posts) {
-      lines.push(
-        [p.ref, oneLine(p.title, titleMax), oneLine(p.publication, 60), p.date ? formatShort(p.date, tz) : "?", p.paywalled ? "paid" : "free", p.type ?? "newsletter", p.url].join(" | "),
-      );
-    }
+  const cl = classifierLine(run.classifier);
+  if (cl) lines.splice(3, 0, cl);
+  const ranked = Boolean(run.classifier?.ranked);
+  const byRank = (list: RunPost[]) => (ranked ? [...list].sort((a, b) => (b.rank ?? 0.5) - (a.rank ?? 0.5)) : list);
+  const main = byRank(run.posts.filter((p) => !p.skipped && !p.low));
+  const low = byRank(run.posts.filter((p) => p.low));
+  const skipped = run.posts.filter((p) => p.skipped);
+  const titleMax = run.posts.length > 120 ? 80 : 140;
+  const row = (p: RunPost) =>
+    [p.ref, ...(ranked ? [p.rank === undefined ? "-" : String(Math.round(p.rank * 100))] : []), oneLine(p.title, titleMax), oneLine(p.publication, 60), p.date ? formatShort(p.date, tz) : "?", p.paywalled ? "paid" : "free", p.type ?? "newsletter", p.url].join(" | ");
+
+  if (main.length) {
+    lines.push(
+      ranked
+        ? "POSTS, best-ranked first (ref | rank 0–100, the classifier's guess at how much the user wants it | title | publication | date | access | type | url):"
+        : "POSTS (ref | title | publication | date | access | type | url):",
+    );
+    for (const p of main) lines.push(row(p));
   } else {
     lines.push("POSTS: none");
+  }
+  if (low.length) {
+    lines.push("", `RANKED LOW (below ${Math.round((run.classifier?.floor ?? 0) * 100)}; reading them is optional, and any without an entry are listed as "Also new"):`);
+    for (const p of low) lines.push(row(p));
+  }
+  if (skipped.length) {
+    lines.push("", "SKIPPED BY CLASSIFIER (match the user's Skip list; don't read them, no entry needed):");
+    lines.push(skipped.map((p) => `${p.ref} ${oneLine(p.title, 60)}`).join(" · "));
   }
   if (run.overflow_posts) {
     lines.push(`(${run.overflow_posts} more new posts didn't fit in max_posts=${run.max_posts}; they come in the next run.)`);
@@ -297,11 +403,12 @@ export function renderBegin(run: RunFile, interests: string): string {
   lines.push("", interests ? `INTERESTS (from interests.md):\n${interests}` : "INTERESTS: none (no interests.md)");
   lines.push("", run.warnings.length ? `WARNINGS:\n${run.warnings.map((w) => `- ${w}`).join("\n")}` : "WARNINGS: none");
 
-  const range = run.posts.length ? `P1–P${run.posts.length}` : "";
+  const toRead = main.map((p) => p.ref);
+  const range = !toRead.length ? "none" : ranked || skipped.length || low.length ? `the ${toRead.length} under POSTS${ranked ? ", best-ranked first" : ""}` : `P1–P${run.posts.length}`;
   lines.push(
     "",
     run.posts.length || run.chats.length
-      ? `NEXT: Read every post (${range || "none"}): read_post takes the ref itself (url: "P3"), so hand subagents the refs exactly as listed here, never renumbered. Summarize every chat (${run.chats.map((c) => c.ref).join(", ") || "none"}). Then call digest_finish once with run_id "${run.run_id}", one posts entry per post ({"ref": "P1", "section": "pick" | "other" | "unreadable", "gist", "why", "preview_only"}) and one chats entry per chat ({"id": "the chat id", "topics", "for_user"}).`
+      ? `NEXT: Read every post (${range}): read_post takes the ref itself (url: "P3"), so hand subagents the refs exactly as listed here, never renumbered. Summarize every chat (${run.chats.map((c) => c.ref).join(", ") || "none"}). Then call digest_finish once with run_id "${run.run_id}", one posts entry per post you read${skipped.length || low.length ? " (none for skipped posts; ranked-low posts only if you read them)" : ""} ({"ref": "P1", "section": "pick" | "other" | "unreadable", "gist", "why", "preview_only"}) and one chats entry per chat ({"id": "the chat id", "topics", "for_user"}).`
       : `NEXT: Nothing new to read. Call digest_finish with run_id "${run.run_id}", posts: [] and chats: [].`,
   );
 

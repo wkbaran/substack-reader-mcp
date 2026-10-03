@@ -7,12 +7,17 @@ import { renderPost } from "./format.js";
 import { SubstackClient } from "./substack/api.js";
 import { renderChatActivity, renderMessages, renderThread, SubstackChat } from "./substack/chat.js";
 import { AuthError, SubstackHttp, type FetchLike } from "./substack/http.js";
-import { digestDir as envDigestDir, digestTimezone } from "./config.js";
+import { digestDir as envDigestDir, digestRankFloor, digestSkipThreshold, digestTimezone } from "./config.js";
+import { renderEvidence } from "./classifier/evidence.js";
+import { classifierFromEnv, samplingFn } from "./classifier/index.js";
+import { proposalSummary, tidyProposal } from "./classifier/proposal.js";
+import { gatherEvidence } from "./digest/evidence.js";
+import { atomicWrite, readDigestFile } from "./digest/state.js";
 import { digestBegin } from "./digest/collect.js";
 import { digestFinish, digestStatus, isPostRef, markReported, resolvePostRef } from "./digest/finish.js";
 import { formatLocal, isoSeconds, parseSince } from "./time.js";
 
-const VERSION = "0.3.1";
+const VERSION = "0.4.0";
 
 /**
  * Hands out a client for the current credentials. Credentials are re-read on
@@ -57,7 +62,7 @@ export function createServer(provider = new ClientProvider(), opts: ServerOption
     { name: "substack-reader", version: VERSION },
     {
       instructions:
-        "Read the user's Substack subscriptions. Start with list_subscriptions or get_feed; " +
+        "Read the user's Substack subscriptions, reading history, and saved and liked posts. Start with list_subscriptions or get_feed; " +
         "subscribe/unsubscribe change the user's account (free subscriptions only) and should only be used when asked. " +
         "publications can be referred to by name, subdomain, or URL. If a tool reports an auth " +
         "problem, tell the user to run `substack-reader-mcp login` in a terminal — do not retry in a loop." +
@@ -158,6 +163,61 @@ export function createServer(provider = new ClientProvider(), opts: ServerOption
       run(async () => {
         const client = await provider.get();
         return json(await client.posts(publication, { limit, offset }));
+      }),
+  );
+
+  server.registerTool(
+    "get_reading_history",
+    {
+      title: "Get reading history",
+      description:
+        "Posts the user has opened on substack.com or in the app (the inbox's Seen tab), most recent first, with how far they read each one (readProgress 0–1), whether they hearted or saved it, and when they opened it. Posts read only by email don't appear. Pass nextCursor back as `cursor` for older ones.",
+      inputSchema: {
+        limit: z.number().int().min(1).max(200).default(40),
+        cursor: z.string().optional().describe("nextCursor from a previous call."),
+      },
+      annotations: readOnly,
+    },
+    ({ limit, cursor }) =>
+      run(async () => {
+        const client = await provider.get();
+        return json(await client.readerPosts("seen", { limit, cursor }));
+      }),
+  );
+
+  server.registerTool(
+    "get_saved_posts",
+    {
+      title: "Get saved posts",
+      description: "Posts the user saved for later on Substack (the inbox's Saved tab), most recently saved first. Pass nextCursor back as `cursor` for more.",
+      inputSchema: {
+        limit: z.number().int().min(1).max(200).default(40),
+        cursor: z.string().optional().describe("nextCursor from a previous call."),
+      },
+      annotations: readOnly,
+    },
+    ({ limit, cursor }) =>
+      run(async () => {
+        const client = await provider.get();
+        return json(await client.readerPosts("saved", { limit, cursor }));
+      }),
+  );
+
+  server.registerTool(
+    "get_liked_posts",
+    {
+      title: "Get liked posts",
+      description: "Posts the user hearted on Substack (their profile's Likes, posts only), most recent first. Pass nextCursor back as `cursor` for more.",
+      inputSchema: {
+        limit: z.number().int().min(1).max(200).default(40),
+        cursor: z.string().optional().describe("nextCursor from a previous call."),
+      },
+      annotations: readOnly,
+    },
+    ({ limit, cursor }) =>
+      run(async () => {
+        const client = await provider.get();
+        return json(await client.likedPosts({ limit, cursor }));
       }),
   );
 
@@ -362,9 +422,63 @@ export function createServer(provider = new ClientProvider(), opts: ServerOption
       }),
   );
 
+  registerInterestTools(server, provider, dir);
   if (dir) registerDigestTools(server, provider, dir, tzConfig, opts);
 
   return server;
+}
+
+/**
+ * interests_evidence (read-only, always) and save_interests_proposal (digest mode only):
+ * the calling agent drafts a proposed interests.md from the reader's own activity.
+ */
+function registerInterestTools(server: McpServer, provider: ClientProvider, dir: string | undefined): void {
+  server.registerTool(
+    "interests_evidence",
+    {
+      title: "Evidence for interests.md",
+      description:
+        "Read-only. Gathers what the user's own Substack activity says about their taste (paid and free subscriptions, saved and hearted posts, how far they read what they opened, posts they dismissed, the digest's picks, hand labels), " +
+        "with rules for turning it into a proposed interests.md for the digest's headline classifier. Draft the proposal from it; don't change interests.md without asking.",
+      inputSchema: {
+        history: z.number().int().min(0).max(300).default(150).describe("Reading-history posts to consider (split by how far they were read)."),
+        list_items: z.number().int().min(0).max(200).default(100).describe("Saved and hearted posts to include, each."),
+        labels: z
+          .enum(["all", "train"])
+          .default("all")
+          .describe('"train" includes only the half of the hand labels reserved for drafting, so the proposal can be tested on the other half (analyze.mjs --test-half).'),
+      },
+      annotations: readOnly,
+    },
+    ({ history, list_items, labels }) =>
+      run(async () => {
+        const client = await provider.get();
+        return text(renderEvidence(await gatherEvidence(client, dir, { history, listItems: list_items, labels })));
+      }),
+  );
+
+  if (!dir) return;
+  server.registerTool(
+    "save_interests_proposal",
+    {
+      title: "Save an interests.md proposal",
+      description:
+        "Save a proposed interests.md as interests.proposed.md in the digest directory, replacing any earlier proposal. interests.md itself is never changed. " +
+        "Returns what differs from the current file. The user adopts it by renaming the file, ideally after comparing both with tools/classifier.",
+      inputSchema: {
+        text: z.string().min(20).max(20_000).describe('The complete proposed file, with "## Interests" and "## Skip" sections. Anything from a "Changes and why" line on is dropped.'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    ({ text: proposal }) =>
+      run(async () => {
+        const tidy = tidyProposal(proposal);
+        if (!tidy.ok) return errorText(tidy.error);
+        const current = (await readDigestFile(dir, "interests.md").catch(() => null)) ?? "";
+        await atomicWrite(dir, "interests.proposed.md", tidy.text);
+        return text(`Saved ${dir}/interests.proposed.md. interests.md is unchanged.\n${proposalSummary(current, tidy.text)}`);
+      }),
+  );
 }
 
 function registerDigestTools(server: McpServer, provider: ClientProvider, dir: string, tz: { timeZone: string; warning?: string }, opts: ServerOptions): void {
@@ -388,8 +502,20 @@ function registerDigestTools(server: McpServer, provider: ClientProvider, dir: s
     ({ max_posts, include_chats, first_run_lookback }) =>
       run(async () => {
         const client = await provider.get();
+        // Off unless SUBSTACK_CLASSIFIER is set: the digest reads every post anyway, so ranking is an opt-in extra.
+        const { classifier, warning } = classifierFromEnv("SUBSTACK", samplingFn(server), process.env, "off");
         const { text: out } = await digestBegin(
-          { dir, client, timezone: tz.timeZone, configWarnings: tz.warning ? [tz.warning] : [], now: opts.now, sleep: opts.sleep },
+          {
+            dir,
+            client,
+            timezone: tz.timeZone,
+            configWarnings: [tz.warning, warning].filter((w): w is string => Boolean(w)),
+            now: opts.now,
+            sleep: opts.sleep,
+            classifier,
+            threshold: digestSkipThreshold(),
+            rankFloor: digestRankFloor(),
+          },
           { maxPosts: max_posts, includeChats: include_chats, firstRunLookback: first_run_lookback },
         );
         return text(out);
@@ -453,7 +579,13 @@ function registerDigestTools(server: McpServer, provider: ClientProvider, dir: s
       description: "Read-only: the digest's last run, number of reported posts, publications waiting to be re-checked, and the current and recent runs. For debugging.",
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
-    () => run(async () => text(await digestStatus(dir, tz.timeZone))),
+    () =>
+      run(async () => {
+        const c = classifierFromEnv("SUBSTACK", samplingFn(server), process.env, "off").classifier;
+        const floor = digestRankFloor();
+        const config = `CLASSIFIER CONFIG: ${c.name} · skip threshold ${Math.round(digestSkipThreshold() * 100)}%${floor ? ` · rank floor ${Math.round(floor * 100)}%` : ""}`;
+        return text(`${await digestStatus(dir, tz.timeZone)}\n${config}`);
+      }),
   );
 
   server.registerTool(
@@ -497,6 +629,10 @@ async function run(fn: () => Promise<CallToolResult>): Promise<CallToolResult> {
 
 function text(t: string): CallToolResult {
   return { content: [{ type: "text", text: t }] };
+}
+
+function errorText(t: string): CallToolResult {
+  return { content: [{ type: "text", text: t }], isError: true };
 }
 
 function json(value: unknown): CallToolResult {

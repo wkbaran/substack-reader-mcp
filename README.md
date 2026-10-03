@@ -8,7 +8,7 @@
 ![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)
 ![MCP](https://img.shields.io/badge/MCP-stdio-6E56CF)
 ![Tools](https://img.shields.io/badge/tools-17%20%2B%205%20digest-informational)
-![Jev](https://img.shields.io/badge/ranking-Jev%20via%20OpenRouter-orange)
+![Jev](https://img.shields.io/badge/ranking-Jev%20decision%20model-orange)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 
 [Quick start](#quick-start) · [Tools](#tools) · [Daily digest](#daily-digest-with-hermes-agent) · [Headline ranking with Jev](#headline-ranking-with-jev) · [Logging in](#logging-in) · [Troubleshooting](#troubleshooting)
@@ -31,7 +31,7 @@ An MCP server for your own Substack account:
 | Your [Substack](https://substack.com) account | Yes. Free and paid subscriptions both work |
 | Node.js 20+ | Yes |
 | Chrome or Edge | Only for the browser login (you can paste a cookie instead) |
-| [Jev](docs/jev/README.md) by TypeSafe, through [OpenRouter](https://openrouter.ai/typesafe/jev-1.13) | Optional. Ranks digest posts against your interests in a few seconds, for about $0.03 per 1,000. Needs an OpenRouter API key |
+| A [Jev](docs/jev/README.md)-style decision model | Optional. Ranks digest posts against your interests in a few seconds. Any provider with the same decisions API works, set by URL, key and model like an OpenAI-compatible client. The default is TypeSafe's Jev on [OpenRouter](https://openrouter.ai/typesafe/jev-1.13), about $0.03 per 1,000 posts |
 | An MCP client | Claude Code, Claude Desktop, Cursor, VS Code, Hermes Agent… |
 
 Substack has no public API. The server calls the endpoints substack.com uses, with your session, so it sees only what you see logged in.
@@ -141,7 +141,8 @@ How to name things:
          SUBSTACK_DIGEST_DIR: /opt/data/sandbox/substack_digest   # absolute; created if needed
          SUBSTACK_DIGEST_TZ: America/Denver
          # SUBSTACK_CLASSIFIER: jev                               # optional; see below
-         # OPENROUTER_API_KEY: ${JEV_OPENROUTER_API_KEY}
+         # SUBSTACK_JEV_API_KEY: ${JEV_OPENROUTER_API_KEY}        # from Hermes's .env
+         # SUBSTACK_JEV_URL: https://openrouter.ai/api/alpha/decisions   # the default; any decisions-API endpoint
    ```
 4. **Install the skill:** copy `hermes/SKILL.md` to `skills/productivity/substack-digest/` and `hermes/substack_digest_start.sh` to `scripts/`. Then edit the skill's Settings block. Optionally add an `interests.md` to the digest directory (from `hermes/interests.example.md`, or [drafted from your activity](docs/classifier.md#proposing-an-interestsmd-from-your-activity)).
 5. **Schedule it** (run as the `hermes` user). The job needs only the `delegation` toolset and this server:
@@ -160,7 +161,7 @@ More detail is in **[docs/digest.md](docs/digest.md)**: why the server has harne
 
 What it still adds on Substack:
 
-- **[Jev](docs/jev/README.md)** is a "decision model" from TypeSafe, served by OpenRouter. It returns typed answers with probabilities, not text. Before anything is read, it gives every post:
+- **[Jev](docs/jev/README.md)** is a "decision model" from TypeSafe. It returns typed answers with probabilities, not text. Before anything is read, it gives every post:
   - a **rank** (how much you'd want it, judged against `interests.md`)
   - a **skip** probability (whether it matches your Skip list)
 - **In the digest:**
@@ -169,8 +170,12 @@ What it still adds on Substack:
   - With `SUBSTACK_DIGEST_RANK_FLOOR`, low-ranked posts become optional, which helps if your subscription list grows.
 - **Backends** (`SUBSTACK_CLASSIFIER`):
   - **`off`** (default).
-  - **`jev`**: ranks and skips. Needs `OPENROUTER_API_KEY`.
+  - **`jev`**: ranks and skips. The server calls the decisions API itself over HTTPS, not through sampling.
   - **`sampling`**: skips only. The server asks your MCP client's own model to rate each headline, which is what *MCP sampling* means: the server borrows the client's LLM rather than having its own. It doesn't rank, so ordering is left to the agent's model.
+- **Any Jev-style provider:** the `jev` backend speaks the decisions API (POST `model`, `state`, `questions` → `answers`), and you point it at a provider the way you'd point an OpenAI-compatible client at a local model:
+  - `SUBSTACK_JEV_URL`: the endpoint. Default: OpenRouter's `https://openrouter.ai/api/alpha/decisions`. TypeSafe's System One API (`…/v1/systemone`) and compatible or self-hosted servers work too.
+  - `SUBSTACK_JEV_API_KEY`: the bearer token (falls back to `OPENROUTER_API_KEY`). It can be empty for a server without auth.
+  - `SUBSTACK_JEV_MODEL`: the model id. Default `typesafe/jev-1.13`; TypeSafe's own API uses `jev-1.13`.
 - **Tune it to you:**
   - Label your own posts with one keypress each, and the tools recommend thresholds and edits to `interests.md`.
   - The tools can also draft an `interests.md` from what you pay for, save, heart, finish and dismiss.
@@ -206,8 +211,9 @@ Everything about it is in **[docs/classifier.md](docs/classifier.md)**.
 | `SUBSTACK_DIGEST_DIR` | Absolute path of the digest directory; setting it turns on the digest tools |
 | `SUBSTACK_DIGEST_TZ` | Time zone for digest and chat times (default UTC) |
 | `SUBSTACK_CLASSIFIER` | `off` (default), `jev` or `sampling` |
-| `OPENROUTER_API_KEY` | For `jev` |
-| `SUBSTACK_JEV_MODEL` | Jev version (default `typesafe/jev-1.13`) |
+| `SUBSTACK_JEV_URL` | Decisions-API endpoint for `jev` (default OpenRouter's) |
+| `SUBSTACK_JEV_API_KEY` | Bearer token for that endpoint (default `OPENROUTER_API_KEY`) |
+| `SUBSTACK_JEV_MODEL` | Model id (default `typesafe/jev-1.13`) |
 | `SUBSTACK_DIGEST_SKIP_THRESHOLD` | Skip probability at which a post is set aside (default 0.7) |
 | `SUBSTACK_DIGEST_RANK_FLOOR` | Rank below which reading a post is optional (default off) |
 
@@ -217,7 +223,7 @@ Everything about it is in **[docs/classifier.md](docs/classifier.md)**.
 
 - **Your session goes only to `substack.com` and `*.substack.com`.** Custom-domain publications get their own session through Substack's sign-in handoff, as in a browser. Redirects are followed one hop at a time, so no cookie reaches another host.
 - **It's stored in `~/.config/substack-reader/auth.json`**, mode `600`. Nothing is stored in the repo.
-- **No telemetry.** Requests go only to Substack, to the publications you ask about, and to OpenRouter if Jev is on (headlines and your interests only).
+- **No telemetry.** Requests go only to Substack, to the publications you ask about, and to your Jev provider if it's on (headlines and your interests only).
 - **Only `subscribe` and `unsubscribe` change anything,** and only free subscriptions.
 - **Reading activity is read, never changed.** The endpoints that mark posts as seen or saved are never called.
 - **`package-lock.json` pins every dependency;** install with `npm ci`.
@@ -231,7 +237,7 @@ Everything about it is in **[docs/classifier.md](docs/classifier.md)**.
 | The server doesn't appear in `/mcp` | Restart Claude Code |
 | `login` can't find a browser | Install Chrome, set `SUBSTACK_BROWSER_PATH`, or use `--paste` |
 | *"doesn't look like a Substack publication"* | The newsletter may have left Substack |
-| The digest says `CLASSIFIER: … unavailable` | Check `OPENROUTER_API_KEY` (for `jev`) or the client's sampling setup |
+| The digest says `CLASSIFIER: … unavailable` | For `jev`, check `SUBSTACK_JEV_URL` and the key; for `sampling`, the client's sampling setup |
 
 ## Development
 

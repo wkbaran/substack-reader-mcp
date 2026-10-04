@@ -14,6 +14,8 @@ An unattended, scheduled digest is a different job from a person chatting: nobod
 
 ## How a run works
 
+[digest-tools.md](digest-tools.md) follows one run step by step, with a diagram, each tool's arguments and real example output.
+
 1. **`digest_begin`** fetches every post published since the last run in your subscriptions, minus ones already reported, plus chats and DMs with new activity. With the [classifier](classifier.md) on, it also ranks the posts and sets aside confident skips. It writes the work list to `current_run.json`.
 2. **Subagents read every post under POSTS**, five per subagent, by ref.
 3. **The agent picks** the posts worth reading in full and summarizes the chats.

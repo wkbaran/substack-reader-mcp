@@ -45,6 +45,7 @@ Common mistakes and confusion points in this project. Add to this list when some
 
 ## Tooling
 
+- **Third-party docs are linked, never copied into the repo.** `docs/jev/README.md` is our own summary with links to the TypeSafe and OpenRouter pages; keep local copies in the gitignored `docs/jev/upstream/`.
 - **The version is in two places:** `package.json` and `VERSION` in `src/server.ts` (what MCP clients see in `serverInfo`). Bump both.
 
 - **`docs/digest-tools.md` is checked by `test/docs-example.test.ts`.** Changing a digest tool's output or input fields fails that test until the doc is updated. Regenerate the output blocks with `UPDATE_DOCS=1 npx vitest run test/docs-example.test.ts`, review the diff, and update the argument tables and prose by hand.

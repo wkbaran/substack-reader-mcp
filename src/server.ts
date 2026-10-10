@@ -17,7 +17,7 @@ import { digestBegin } from "./digest/collect.js";
 import { digestFinish, digestStatus, isPostRef, markReported, resolvePostRef } from "./digest/finish.js";
 import { formatLocal, isoSeconds, parseSince } from "./time.js";
 
-const VERSION = "0.4.0";
+const VERSION = "0.4.1";
 
 /**
  * Hands out a client for the current credentials. Credentials are re-read on
@@ -491,7 +491,7 @@ function registerDigestTools(server: McpServer, provider: ClientProvider, dir: s
       description:
         "Start a digest run: fetch every post published since the last digest (minus ones already reported), the chats with new activity, and the user's interests, " +
         "and save the work list for digest_finish. Returns plain text with a RUN_ID, one line per post (ref P1, P2, …) and per chat, and what to do next. " +
-        "Doesn't change the digest state; only digest_finish does.",
+        "Doesn't change the digest state; only digest_finish does. A second call while the run is unfinished returns the same run.",
       inputSchema: {
         max_posts: z.number().int().min(1).max(200).default(100).describe("At most this many posts (newest first); the rest carry over to the next run."),
         include_chats: z.boolean().default(true),

@@ -41,6 +41,7 @@ An unattended, scheduled digest is a different job from a person chatting: nobod
 - **State:** `state.json` records every post in each run (the newest 500 URLs), so posts never repeat, including ones that couldn't be read.
   - Writes are atomic and locked.
   - `digest_begin` writes only `current_run.json`, so a run that dies early saves nothing; the next run covers the same period.
+  - A second `digest_begin` while a run is unfinished and under 90 minutes old returns that run (same `RUN_ID`, same refs, nothing fetched) instead of replacing it. That covers a retry after a timeout, and a subagent that calls `digest_begin` on its own. The continued view leaves out the "call `digest_finish`" instruction. An older unfinished run is replaced, with a warning.
   - Committed runs are also kept as `runs/<run_id>.json` (newest 14), for the classifier tools.
   - Inspect with `digest_status`; repair with `mark_reported`.
 - **Rate limits:** Substack returns 429 when asked for too many archives at once.

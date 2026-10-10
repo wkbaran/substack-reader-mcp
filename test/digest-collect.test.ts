@@ -189,11 +189,49 @@ describe("digestBegin", () => {
     expect(await readdir(dir)).toEqual([]);
   });
 
-  it("replaces an unfinished run and says so", async () => {
+  it("continues an unfinished run that is under 90 minutes old, without fetching or running a new one", async () => {
+    await writeFile(join(dir, "interests.md"), "AI research, economics");
+    const { begin, requests } = setup({ [archive("alpha")]: { body: [p("alpha", 1, "2026-10-02T09:00:00Z")] } });
+    const first = await begin();
+    const fetched = requests.length;
+    const before = await readFile(join(dir, "current_run.json"), "utf8");
+    const second = await begin();
+    expect(second.run.run_id).toBe(first.run.run_id);
+    expect(requests.length).toBe(fetched);
+    expect(await readFile(join(dir, "current_run.json"), "utf8")).toBe(before);
+    expect(second.text).toContain(`Continuing the open digest run ${first.run.run_id}`);
+    expect(second.text).toContain(`RUN_ID: ${first.run.run_id}`);
+    expect(second.text).toContain("P1 | alpha 1 | Alpha");
+    expect(second.text).toContain("INTERESTS (from interests.md):\nAI research, economics");
+    // a subagent that lands here isn't invited to finish the digest
+    expect(second.text).not.toContain("NEXT:");
+    expect(second.text).not.toContain("never finished");
+    expect(first.text).toContain("NEXT:");
+  });
+
+  it("replaces an unfinished run that is 90 minutes old or more, and says so", async () => {
     const { begin } = setup({});
     const first = await begin();
-    const second = await begin();
+    const later = NOW + 90 * 60_000;
+    const { fetch } = fakeFetch({
+      "https://substack.com/api/v1/user/profile/self": authed(PROFILE),
+      "https://substack.com/api/v1/messages/inbox?tab=all": authed({ threads: [] }),
+      [archive("alpha")]: { body: [] },
+      [archive("beta")]: { body: [] },
+      [archive("gone")]: { status: 404 },
+    } as never);
+    const client = new SubstackClient(new SubstackHttp({ sid: SID, fetch, sleep: async () => {} }));
+    const second = await digestBegin({ dir, client, timezone: "America/Denver", now: () => later }, {});
     expect(second.run.run_id).not.toBe(first.run.run_id);
     expect(second.text).toContain(`Run ${first.run.run_id} (started 2026-10-02T12:00:24Z) never finished`);
+  });
+
+  it("starts a fresh run once the last one was finished, and ignores an unreadable leftover", async () => {
+    const { begin } = setup({});
+    await begin();
+    await writeFile(join(dir, "current_run.json"), "{not json");
+    const again = await begin();
+    expect(again.text).not.toContain("Continuing");
+    expect((await runFile()).run_id).toBe(again.run.run_id);
   });
 });

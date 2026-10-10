@@ -124,10 +124,56 @@ export interface BeginDeps {
 const INTERESTS_MAX = 4000;
 const OUTPUT_MAX = 40_000;
 
+/** A begin within this long of an unfinished run's start continues that run instead of starting another. */
+export const RESUME_MINUTES = 90;
+
+/** The unfinished run in current_run.json, if it started under RESUME_MINUTES ago. */
+async function openRun(dir: string, now: number): Promise<RunFile | null> {
+  const raw = await readDigestFile(dir, FILES.currentRun).catch(() => null);
+  if (!raw) return null;
+  try {
+    const run = JSON.parse(raw) as RunFile;
+    const started = Date.parse(run.fetch_start);
+    if (typeof run.run_id !== "string" || !Array.isArray(run.posts) || Number.isNaN(started) || now - started >= RESUME_MINUTES * 60_000) return null;
+    return run;
+  } catch {
+    return null;
+  }
+}
+
+/** interests.md for the work list, cut to INTERESTS_MAX; `full` is what the classifier sees. */
+async function readInterests(dir: string, warnings: string[]): Promise<{ interests: string; full: string }> {
+  let interests = "";
+  let full = "";
+  try {
+    full = interests = (await readDigestFile(dir, FILES.interests))?.trim() ?? "";
+    if (interests.length > INTERESTS_MAX) {
+      interests = interests.slice(0, INTERESTS_MAX) + "\n[interests.md truncated]";
+      warnings.push(`interests.md is longer than ${INTERESTS_MAX} characters; only the start is used.`);
+    }
+  } catch (err) {
+    warnings.push(`Couldn't read interests.md: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return { interests, full };
+}
+
 export async function digestBegin(deps: BeginDeps, opts: BeginOptions = {}): Promise<{ text: string; run: RunFile }> {
   const now = deps.now ?? Date.now;
   const maxPosts = Math.min(200, Math.max(1, Math.trunc(opts.maxPosts ?? 100)));
   const warnings = [...(deps.configWarnings ?? [])];
+
+  // A second begin while a run is open continues that run. A retry after a timeout, or a subagent
+  // calling begin (a chat reader did on 2026-10-09), would otherwise replace the run the main
+  // model is working from. Nothing is fetched, so this needs no sign-in check.
+  const open = await openRun(deps.dir, now());
+  if (open) {
+    const { interests } = await readInterests(deps.dir, []);
+    const header =
+      `Continuing the open digest run ${open.run_id} (started ${open.fetch_start}; nothing new was fetched). ` +
+      `If you were asked to read posts or chats for someone else, call only read_post and get_chat_activity and reply with what you were asked for; ` +
+      `only the model writing the digest calls digest_begin or digest_finish.\n\n`;
+    return { text: header + renderBegin(open, interests).replace(/\n\nNEXT: [\s\S]*$/, ""), run: open };
+  }
 
   // Fails with AuthError (reported as an auth problem) before anything else happens.
   await deps.client.whoami();
@@ -231,17 +277,7 @@ export async function digestBegin(deps: BeginDeps, opts: BeginOptions = {}): Pro
     }
   }
 
-  let interests = "";
-  let interestsFull = "";
-  try {
-    interestsFull = interests = (await readDigestFile(deps.dir, FILES.interests))?.trim() ?? "";
-    if (interests.length > INTERESTS_MAX) {
-      interests = interests.slice(0, INTERESTS_MAX) + "\n[interests.md truncated]";
-      warnings.push(`interests.md is longer than ${INTERESTS_MAX} characters; only the start is used.`);
-    }
-  } catch (err) {
-    warnings.push(`Couldn't read interests.md: ${err instanceof Error ? err.message : String(err)}`);
-  }
+  const { interests, full: interestsFull } = await readInterests(deps.dir, warnings);
 
   // The classifier keeps real time, so hand it the time left rather than a timestamp on deps.now's clock.
   const left = fetchStart + (deps.totalBudgetMs ?? 250_000) - now();

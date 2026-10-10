@@ -147,6 +147,8 @@ Substack records more about how you read than most platforms, so a first `intere
 
 Ask your agent "propose an interests.md from my Substack activity", or run `tools/classifier/propose.mjs --model <model>` against any OpenAI-compatible endpoint (OpenRouter by default).
 
+OpenRouter isn't required. To bill a Claude model to your own Anthropic API key, use Anthropic's OpenAI-compatible endpoint: `PROPOSE_API_KEY=$ANTHROPIC_API_KEY node --env-file=.env tools/classifier/propose.mjs --base https://api.anthropic.com/v1 --model <Anthropic model id>`. Jev is the only part of this that needs OpenRouter.
+
 **Test before adopting** once you have labels. Draft from half of them (`labels: "train"` / `--labels train`), score the proposal (`score.mjs --interests …/interests.proposed.md`), and compare with `analyze.mjs --test-half`, which uses only the labels the draft didn't see. On Medium, a draft written blind this way beat the hand-written file on held-out labels (AUC 84.6 vs 81.7; see medium-reader-mcp's docs/classifier.md).
 
 Without labels, a proposal is still a better start than an empty file. On the maintainer's account (October 2026), `propose.mjs` turned 35 subscriptions, 117 saves, 100 hearts and 160 reads into 10 Interest bullets. Each was tied to signals that recurred across saves, hearts and finished reads, and they covered non-technical topics as well as technical ones. It proposed no Skip bullets, correctly: the only negative evidence was two dismissed posts from sources the reader otherwise hearts or pays for.

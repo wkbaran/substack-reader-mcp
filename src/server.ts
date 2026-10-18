@@ -18,7 +18,7 @@ import { digestBegin } from "./digest/collect.js";
 import { digestFinish, digestStatus, isPostRef, markReported, resolvePostRef } from "./digest/finish.js";
 import { formatLocal, parseSince } from "./time.js";
 
-const VERSION = "0.4.1";
+const VERSION = "0.4.2";
 
 /**
  * Hands out a client for the current credentials. Credentials are re-read on

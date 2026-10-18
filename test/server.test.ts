@@ -169,7 +169,8 @@ describe("digest tools", () => {
     expect(byName.digest_begin!.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: false });
     expect(byName.digest_finish!.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: false, idempotentHint: true });
     expect(byName.mark_reported!.annotations).toMatchObject({ readOnlyHint: false, idempotentHint: true });
-    expect(tools.every((t) => !t.outputSchema)).toBe(true);
+    // Only digest_begin returns structuredContent (the work list for code-driven clients); its text stays the model's view.
+    expect(tools.filter((t) => t.outputSchema).map((t) => t.name)).toEqual(["digest_begin"]);
   });
 
   it("ranks and skips with Jev when SUBSTACK_CLASSIFIER=jev: sorted list, skipped posts need no entry, low-ranked ones go under Also new", async () => {
@@ -196,8 +197,16 @@ describe("digest tools", () => {
       },
     };
     const client = await connect(withPodcast, { digestDir: dir, timezone: "America/Denver", now: () => NOW, sleep: async () => {} });
-    const begin = textOf(await client.callTool({ name: "digest_begin", arguments: {} }));
+    const beginResult = await client.callTool({ name: "digest_begin", arguments: {} });
+    const begin = textOf(beginResult);
     expect(sent).toHaveLength(3);
+    const work = beginResult.structuredContent as { run_id: string; resumed: boolean; posts: { ref: string; status: string; rank?: number }[]; interests: string };
+    expect(work.run_id).toBe(runIdOf(begin));
+    expect(work.resumed).toBe(false);
+    expect(work.posts.map((p) => [p.ref, p.status, p.rank])).toEqual([["P3", "read", 90], ["P2", "low", 20], ["P1", "skipped", 0]]);
+    expect(work.interests).toContain("Economics");
+    const again = await client.callTool({ name: "digest_begin", arguments: {} });
+    expect((again.structuredContent as { run_id: string; resumed: boolean })).toMatchObject({ run_id: work.run_id, resumed: true });
     expect(sent[0]!.state.reader).toEqual({ interests: ["Economics"], skips: ["Podcast show notes"] });
     expect(begin).toContain("CLASSIFIER: jev (typesafe/jev-1.13): 3 ranked · 1 skipped (threshold 70%) · 1 below rank floor 30%");
     expect(begin).toMatch(/POSTS, best-ranked first .*\nP3 \| 90 \| Second \| Example/);

@@ -482,6 +482,42 @@ function registerInterestTools(server: McpServer, provider: ClientProvider, dir:
   );
 }
 
+/** digest_begin's structuredContent: the same work list as its text, for clients that run the digest from code. */
+const workListShape = {
+  run_id: z.string(),
+  since: z.string(),
+  first_run: z.boolean(),
+  resumed: z.boolean().describe("true when an open run was continued and nothing was fetched."),
+  posts: z
+    .array(
+      z.object({
+        ref: z.string(),
+        status: z.enum(["read", "low", "skipped"]).describe("read: give an entry. low: below the rank floor, an entry is optional. skipped: no entry."),
+        url: z.string(),
+        title: z.string(),
+        subtitle: z.string().optional(),
+        author: z.string().optional(),
+        publication: z.string(),
+        date: z.string().optional(),
+        paywalled: z.boolean(),
+        type: z.string(),
+        rank: z.number().optional().describe("0–100, when the classifier ranked it."),
+      }),
+    )
+    .describe("Read posts first, then low, then skipped; best-ranked first within each when ranked."),
+  chats: z.array(
+    z.object({
+      ref: z.string(),
+      id: z.string(),
+      kind: z.string(),
+      name: z.string(),
+      arguments: z.object({ since: z.string(), chat_id: z.string(), transcripts: z.literal(true) }).describe("Pass to get_chat_activity as is."),
+    }),
+  ),
+  interests: z.string(),
+  warnings: z.array(z.string()),
+};
+
 function registerDigestTools(server: McpServer, provider: ClientProvider, dir: string, tz: { timeZone: string; warning?: string }, opts: ServerOptions): void {
   const lenientBool = z.union([z.boolean(), z.string()]).optional();
 
@@ -498,6 +534,7 @@ function registerDigestTools(server: McpServer, provider: ClientProvider, dir: s
         include_chats: z.boolean().default(true),
         first_run_lookback: z.string().default("48h").describe('How far back to look when there is no saved state yet ("48h", "7d").'),
       },
+      outputSchema: workListShape,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
     ({ max_posts, include_chats, first_run_lookback }) =>
@@ -505,7 +542,7 @@ function registerDigestTools(server: McpServer, provider: ClientProvider, dir: s
         const client = await provider.get();
         // Off unless SUBSTACK_CLASSIFIER is set: the digest reads every post anyway, so ranking is an opt-in extra.
         const { classifier, warning } = classifierFromEnv("SUBSTACK", samplingFn(server), process.env, "off");
-        const { text: out } = await digestBegin(
+        const { text: out, work } = await digestBegin(
           {
             dir,
             client,
@@ -519,7 +556,7 @@ function registerDigestTools(server: McpServer, provider: ClientProvider, dir: s
           },
           { maxPosts: max_posts, includeChats: include_chats, firstRunLookback: first_run_lookback },
         );
-        return text(out);
+        return { content: [{ type: "text", text: out }], structuredContent: { ...work } };
       }),
   );
 

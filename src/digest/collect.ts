@@ -158,7 +158,62 @@ async function readInterests(dir: string, warnings: string[]): Promise<{ interes
   return { interests, full };
 }
 
-export async function digestBegin(deps: BeginDeps, opts: BeginOptions = {}): Promise<{ text: string; run: RunFile }> {
+/**
+ * The work list as data, for clients that drive the digest from code instead of
+ * a model reading renderBegin's text. Same posts, refs and chat arguments.
+ */
+export interface WorkList {
+  run_id: string;
+  since: string;
+  first_run: boolean;
+  /** true when digest_begin continued an open run instead of fetching. */
+  resumed: boolean;
+  /** read: read and give an entry. low: below the rank floor, optional. skipped: needs no entry. Ranked runs list best first. */
+  posts: Array<{
+    ref: string;
+    status: "read" | "low" | "skipped";
+    url: string;
+    title: string;
+    subtitle?: string;
+    author?: string;
+    publication: string;
+    date?: string;
+    paywalled: boolean;
+    type: string;
+    /** 0–100, when the classifier ranked it. */
+    rank?: number;
+  }>;
+  chats: Array<{ ref: string; id: string; kind: string; name: string; arguments: { since: string; chat_id: string; transcripts: true } }>;
+  /** interests.md as the model sees it; "" when there is none. */
+  interests: string;
+  warnings: string[];
+}
+
+export function workList(run: RunFile, interests: string, resumed: boolean): WorkList {
+  const ranked = Boolean(run.classifier?.ranked);
+  const status = (p: RunPost): "read" | "low" | "skipped" => (p.skipped ? "skipped" : p.low ? "low" : "read");
+  const order = { read: 0, low: 1, skipped: 2 };
+  const posts = run.posts
+    .map((p, i) => ({ p, i }))
+    .sort((a, b) => order[status(a.p)] - order[status(b.p)] || (ranked ? (b.p.rank ?? 0.5) - (a.p.rank ?? 0.5) : 0) || a.i - b.i)
+    .map(({ p }) => ({
+      ref: p.ref,
+      status: status(p),
+      url: p.url,
+      title: p.title,
+      ...(p.subtitle ? { subtitle: p.subtitle } : {}),
+      ...(p.author ? { author: p.author } : {}),
+      publication: p.publication,
+      ...(p.date ? { date: p.date } : {}),
+      paywalled: p.paywalled,
+      type: p.type ?? "newsletter",
+      ...(p.rank !== undefined ? { rank: Math.round(p.rank * 100) } : {}),
+    }));
+  const chats = run.chats.map((c) => ({ ref: c.ref, id: c.id, kind: c.kind, name: c.name, arguments: { since: run.chat_since ?? run.since, chat_id: c.id, transcripts: true as const } }));
+  return { run_id: run.run_id, since: run.since, first_run: run.first_run, resumed, posts, chats, interests, warnings: run.warnings };
+}
+
+export async function digestBegin(deps: BeginDeps, opts: BeginOptions = {}): Promise<{ text: string; run: RunFile; work: WorkList }> {
   const now = deps.now ?? Date.now;
   const maxPosts = Math.min(200, Math.max(1, Math.trunc(opts.maxPosts ?? 100)));
   const warnings = [...(deps.configWarnings ?? [])];
@@ -173,7 +228,7 @@ export async function digestBegin(deps: BeginDeps, opts: BeginOptions = {}): Pro
       `Continuing the open digest run ${open.run_id} (started ${open.fetch_start}; nothing new was fetched). ` +
       `If you were asked to read posts or chats for someone else, call only read_post and get_chat_activity and reply with what you were asked for; ` +
       `only the model writing the digest calls digest_begin or digest_finish.\n\n`;
-    return { text: header + renderBegin(open, interests).replace(/\n\nNEXT: [\s\S]*$/, ""), run: open };
+    return { text: header + renderBegin(open, interests).replace(/\n\nNEXT: [\s\S]*$/, ""), run: open, work: workList(open, interests, true) };
   }
 
   // Fails with AuthError (reported as an auth problem) before anything else happens.
@@ -316,7 +371,7 @@ export async function digestBegin(deps: BeginDeps, opts: BeginOptions = {}): Pro
     await atomicWrite(deps.dir, FILES.currentRun, JSON.stringify(run, null, 2) + "\n");
   });
 
-  return { text: renderBegin(run, interests), run };
+  return { text: renderBegin(run, interests), run, work: workList(run, interests, false) };
 }
 
 /** Rank and skip-check every post's headline against interests.md. Never throws. */

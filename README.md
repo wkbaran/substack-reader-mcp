@@ -4,7 +4,7 @@
 
 **Ask Claude what's new in your Substack subscriptions, and have it read the posts for you.**
 
-![Node 20+](https://img.shields.io/badge/node-20%2B-339933?logo=nodedotjs&logoColor=white)
+![npm](https://img.shields.io/npm/v/substack-reader-mcp) ![Node 26+](https://img.shields.io/badge/node-26%2B-339933?logo=nodedotjs&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)
 ![MCP](https://img.shields.io/badge/MCP-stdio-6E56CF)
 ![Tools](https://img.shields.io/badge/tools-17%20%2B%205%20digest-informational)
@@ -29,7 +29,7 @@ An MCP server for your own Substack account:
 | What | Needed? |
 |---|---|
 | Your [Substack](https://substack.com) account | Yes. Free and paid subscriptions both work |
-| Node.js 20+ | Yes |
+| Node.js 26+ | Yes |
 | Chrome or Edge | Only for the browser login (you can paste a cookie instead) |
 | A [Jev](docs/jev/README.md)-style decision model | Optional. Ranks digest posts against your interests in a few seconds. Any provider with the same decisions API works, set by URL, key and model like an OpenAI-compatible client. The default is TypeSafe's Jev on [OpenRouter](https://openrouter.ai/typesafe/jev-1.13), about $0.03 per 1,000 posts |
 | An MCP client | Claude Code, Claude Desktop, Cursor, VS Code, Hermes Agent… |
@@ -39,13 +39,13 @@ Substack has no public API. The server calls the endpoints substack.com uses, wi
 ## Quick start
 
 ```bash
-git clone https://github.com/wkbaran/substack-reader-mcp.git
-cd substack-reader-mcp
-npm install && npm run build
+npm install -g substack-reader-mcp
 
-node dist/cli.js login     # a browser window opens; sign in to Substack as usual
-node dist/cli.js install   # registers the server with Claude Code
+substack-reader-mcp login     # a browser window opens; sign in to Substack as usual
+substack-reader-mcp install   # registers the server with Claude Code
 ```
+
+From source instead: `git clone https://github.com/wkbaran/substack-reader-mcp.git`, then `npm install && npm run build`, and use `node dist/cli.js` in place of `substack-reader-mcp`.
 
 Restart Claude Code, then try:
 
@@ -58,16 +58,16 @@ Restart Claude Code, then try:
 <details>
 <summary><b>Other MCP clients</b> (Claude Desktop, Cursor, VS Code)</summary>
 
-Point the client at `dist/cli.js` with an absolute path, after running `login`:
+Point the client at the `substack-reader-mcp` command (or `node` with the absolute path of `dist/cli.js` for a source checkout), after running `login`:
 
 ```json
-{ "mcpServers": { "substack-reader": { "command": "node", "args": ["/absolute/path/to/substack-reader-mcp/dist/cli.js"] } } }
+{ "mcpServers": { "substack-reader": { "command": "substack-reader-mcp" } } }
 ```
 
 - **Claude Desktop:** `claude_desktop_config.json` (Settings → Developer → Edit Config)
 - **Cursor:** `~/.cursor/mcp.json`
 - **VS Code:** `.vscode/mcp.json`, using `"servers"` instead of `"mcpServers"` and adding `"type": "stdio"`
-- **Claude Code, manually:** `claude mcp add --scope user substack-reader -- node /absolute/path/to/dist/cli.js`
+- **Claude Code, manually:** `claude mcp add --scope user substack-reader -- substack-reader-mcp`
 </details>
 
 ## Tools
@@ -131,7 +131,7 @@ A worked example of a whole run, with each tool's arguments and output: [docs/di
 **Setup**
 
 1. **Build** (`npm ci && npm run build`) and copy `dist/`, `package.json` and `package-lock.json` to where Hermes can see them, e.g. `/opt/data/mcp/substack-reader-mcp`. Then run `npm ci --omit=dev --omit=optional` there.
-2. **Log in** on a machine with a browser (`node dist/cli.js login`), then copy `~/.config/substack-reader/auth.json` to the Hermes host, e.g. `/opt/data/mcp/substack-reader-home/`.
+2. **Log in** on a machine with a browser (`substack-reader-mcp login`), then copy `~/.config/substack-reader/auth.json` to the Hermes host, e.g. `/opt/data/mcp/substack-reader-home/`.
 3. **Register the server** in Hermes's `config.yaml`:
    ```yaml
    mcp_servers:
@@ -195,10 +195,10 @@ Everything about it is in **[docs/classifier.md](docs/classifier.md)**.
 
 | Command | What it does |
 |---|---|
-| `node dist/cli.js login` | Log in (`--paste` / `--stdin` to paste the cookie) |
-| `node dist/cli.js status` | The logged-in account, subscription count, and whether the session works |
-| `node dist/cli.js logout` | Delete the session (`--all` also deletes the login browser profile) |
-| `node dist/cli.js install` | Register with Claude Code (`--scope user\|project\|local`) |
+| `substack-reader-mcp login` | Log in (`--paste` / `--stdin` to paste the cookie) |
+| `substack-reader-mcp status` | The logged-in account, subscription count, and whether the session works |
+| `substack-reader-mcp logout` | Delete the session (`--all` also deletes the login browser profile) |
+| `substack-reader-mcp install` | Register with Claude Code (`--scope user\|project\|local`) |
 
 <details>
 <summary><b>Environment variables</b></summary>
@@ -234,7 +234,7 @@ Everything about it is in **[docs/classifier.md](docs/classifier.md)**.
 
 | Symptom | Fix |
 |---|---|
-| *"Not logged in"* / *"session was rejected"* | `node dist/cli.js login` (sessions last about three months) |
+| *"Not logged in"* / *"session was rejected"* | `substack-reader-mcp login` (sessions last about three months) |
 | *"Only a preview was returned"* | No paid subscription to that publication, or the session expired; `status` checks |
 | The server doesn't appear in `/mcp` | Restart Claude Code |
 | `login` can't find a browser | Install Chrome, set `SUBSTACK_BROWSER_PATH`, or use `--paste` |

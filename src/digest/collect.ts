@@ -51,6 +51,17 @@ export interface RunChat {
   name: string;
   newThreads: number;
   repliedThreads: number;
+  /** Checked from this earlier cutoff (it couldn't be checked last time); else the run's chat_since. */
+  since?: string;
+}
+
+/** A chat that couldn't be checked in this run; digest_finish keeps it in pending_chats. */
+export interface ChatFailure {
+  id: string;
+  name: string;
+  /** The cutoff to retry from. */
+  since: string;
+  error: string;
 }
 
 export interface RunPublication {
@@ -87,6 +98,8 @@ export interface RunFile {
   posts: RunPost[];
   chats: RunChat[];
   chat_since?: string;
+  /** Chats that couldn't be checked (absent in runs from before 0.6.0). */
+  chat_failures?: ChatFailure[];
   publications: RunPublication[];
   give_ups: GiveUp[];
   max_posts: number;
@@ -127,6 +140,9 @@ const OUTPUT_MAX = 40_000;
 
 /** A begin within this long of an unfinished run's start continues that run instead of starting another. */
 export const RESUME_MINUTES = 90;
+
+/** pending_chats key for "the whole chat check failed", retried for every chat. */
+export const ALL_CHATS = "*";
 
 /** The unfinished run in current_run.json, if it started under RESUME_MINUTES ago. */
 async function openRun(dir: string, now: number): Promise<RunFile | null> {
@@ -189,6 +205,11 @@ export interface WorkList {
   warnings: string[];
 }
 
+/** What get_chat_activity needs to show a chat's new activity in this run. */
+function chatArguments(run: RunFile, c: RunChat): { since: string; chat_id: string; transcripts: true } {
+  return { since: c.since ?? run.chat_since ?? run.since, chat_id: c.id, transcripts: true };
+}
+
 export function workList(run: RunFile, interests: string, resumed: boolean): WorkList {
   const ranked = Boolean(run.classifier?.ranked);
   const status = (p: RunPost): "read" | "low" | "skipped" => (p.skipped ? "skipped" : p.low ? "low" : "read");
@@ -209,7 +230,7 @@ export function workList(run: RunFile, interests: string, resumed: boolean): Wor
       type: p.type ?? "newsletter",
       ...(p.rank !== undefined ? { rank: Math.round(p.rank * 100) } : {}),
     }));
-  const chats = run.chats.map((c) => ({ ref: c.ref, id: c.id, kind: c.kind, name: c.name, arguments: { since: run.chat_since ?? run.since, chat_id: c.id, transcripts: true as const } }));
+  const chats = run.chats.map((c) => ({ ref: c.ref, id: c.id, kind: c.kind, name: c.name, arguments: chatArguments(run, c) }));
   return { run_id: run.run_id, since: run.since, first_run: run.first_run, resumed, posts, chats, interests, warnings: run.warnings };
 }
 
@@ -311,11 +332,25 @@ export async function digestBegin(deps: BeginDeps, opts: BeginOptions = {}): Pro
     .filter((p) => (p.outcome === "failed" || p.outcome === "overflow") && p.since && fetchStart - Date.parse(p.since) > GIVE_UP_MS)
     .map((p) => ({ id: p.id, name: p.name, from: p.since!, to: fetchStartIso, error: p.error }));
 
-  // Chats: activity since the previous run.
+  // Chats: activity since the previous run. A chat that couldn't be checked before is
+  // checked from its older cutoff, and one that fails now is kept for the next run.
   let chats: RunChat[] = [];
+  const chatFailures: ChatFailure[] = [];
+  const pendingChats = state.pending_chats ?? {};
   if (opts.includeChats ?? true) {
+    const cutoff = (id: string): Date | undefined => {
+      const p = pendingChats[id] ?? pendingChats[ALL_CHATS];
+      const t = p ? Date.parse(p.since) : NaN;
+      if (Number.isNaN(t)) return undefined;
+      if (fetchStart - t > GIVE_UP_MS) return undefined; // too old; checked from the normal cutoff
+      return new Date(t);
+    };
+    for (const [id, p] of Object.entries(pendingChats)) {
+      if (fetchStart - Date.parse(p.since) > GIVE_UP_MS) warnings.push(`Giving up on ${p.name}'s chat activity from ${formatDay(p.since, deps.timezone)} (not checked for over 7 days).`);
+      else if (id !== ALL_CHATS) warnings.push(`Re-checking ${p.name}'s chat from ${formatDay(p.since, deps.timezone)}, since the last run couldn't.`);
+    }
     try {
-      const activity = await new SubstackChat(deps.client).activity(since);
+      const activity = await new SubstackChat(deps.client).activity(since, { sinceFor: cutoff });
       chats = activity.chats.map((c, i) => ({
         ref: `C${i + 1}`,
         id: c.id,
@@ -323,13 +358,19 @@ export async function digestBegin(deps: BeginDeps, opts: BeginOptions = {}): Pro
         name: c.name,
         newThreads: c.threads.filter((t) => t.status === "new_thread").length,
         repliedThreads: c.threads.filter((t) => t.status === "new_replies").length,
+        ...(c.since ? { since: isoSeconds(new Date(c.since)) } : {}),
       }));
       for (const e of activity.errors) {
-        if (!/no chat/.test(e.error)) warnings.push(`Couldn't check the chat for ${e.name}: ${e.error}`);
+        if (/no chat/.test(e.error)) continue;
+        warnings.push(`Couldn't check the chat for ${e.name}: ${e.error} (retried next run)`);
+        chatFailures.push({ id: e.id, name: e.name, since: isoSeconds(cutoff(e.id) ?? since), error: e.error });
       }
     } catch (err) {
       if (err instanceof AuthError) throw err;
-      warnings.push(`Couldn't check chats: ${err instanceof Error ? err.message : String(err)}`);
+      warnings.push(`Couldn't check chats: ${err instanceof Error ? err.message : String(err)} (retried next run)`);
+      const all = pendingChats[ALL_CHATS];
+      const keep = all && fetchStart - Date.parse(all.since) <= GIVE_UP_MS && Date.parse(all.since) < since.getTime() ? all.since : sinceIso;
+      chatFailures.push({ id: ALL_CHATS, name: "all chats", since: keep, error: err instanceof Error ? err.message : String(err) });
     }
   }
 
@@ -350,6 +391,7 @@ export async function digestBegin(deps: BeginDeps, opts: BeginOptions = {}): Pro
     posts,
     chats,
     chat_since: chats.length ? sinceIso : undefined,
+    ...(chatFailures.length ? { chat_failures: chatFailures } : {}),
     publications,
     give_ups: giveUps,
     max_posts: maxPosts,
@@ -486,7 +528,7 @@ export function renderBegin(run: RunFile, interests: string): string {
     lines.push("CHATS WITH ACTIVITY (ref | chat id | name | activity | get_chat_activity arguments):");
     for (const c of run.chats) {
       const activity = c.kind === "direct_message" ? "new messages" : `${c.newThreads} new thread${c.newThreads === 1 ? "" : "s"}, ${c.repliedThreads} thread${c.repliedThreads === 1 ? "" : "s"} with new replies`;
-      lines.push([c.ref, c.id, c.name, activity, JSON.stringify({ since: run.chat_since, chat_id: c.id, transcripts: true })].join(" | "));
+      lines.push([c.ref, c.id, c.name, activity, JSON.stringify(chatArguments(run, c))].join(" | "));
     }
   } else {
     lines.push("CHATS WITH ACTIVITY: none");

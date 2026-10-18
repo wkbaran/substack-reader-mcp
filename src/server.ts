@@ -8,7 +8,7 @@ import { renderPost } from "./format.js";
 import { SubstackClient } from "./substack/api.js";
 import { renderChatActivity, renderMessages, renderThread, SubstackChat } from "./substack/chat.js";
 import { AuthError, SubstackHttp, type FetchLike } from "./substack/http.js";
-import { digestDir as envDigestDir, digestRankFloor, digestSkipThreshold, digestTimezone } from "./config.js";
+import { digestDir as envDigestDir, digestFetchBudget, digestRankFloor, digestSkipThreshold, digestTimezone } from "./config.js";
 import { renderEvidence } from "./classifier/evidence.js";
 import { classifierFromEnv, samplingFn } from "./classifier/index.js";
 import { proposalSummary, tidyProposal } from "./classifier/proposal.js";
@@ -18,7 +18,7 @@ import { digestBegin } from "./digest/collect.js";
 import { digestFinish, digestStatus, isPostRef, markReported, resolvePostRef } from "./digest/finish.js";
 import { formatLocal, parseSince } from "./time.js";
 
-const VERSION = "0.5.0";
+const VERSION = "0.6.0";
 
 /**
  * Hands out a client for the current credentials. Credentials are re-read on
@@ -58,7 +58,7 @@ export interface ServerOptions {
 
 export function createServer(provider = new ClientProvider(), opts: ServerOptions = {}): McpServer {
   const dir = opts.digestDir ?? envDigestDir();
-  const tzConfig = digestTimezone(opts.timezone);
+  const tzConfig = opts.timezone ? digestTimezone({ SUBSTACK_DIGEST_TZ: opts.timezone }) : digestTimezone();
   const server = new McpServer(
     { name: "substack-reader", version: VERSION },
     {
@@ -542,12 +542,15 @@ function registerDigestTools(server: McpServer, provider: ClientProvider, dir: s
         const client = await provider.get();
         // Off unless SUBSTACK_CLASSIFIER is set: the digest reads every post anyway, so ranking is an opt-in extra.
         const { classifier, warning } = classifierFromEnv("SUBSTACK", samplingFn(server), process.env, "off");
+        const budget = digestFetchBudget();
         const { text: out, work } = await digestBegin(
           {
             dir,
             client,
             timezone: tz.timeZone,
-            configWarnings: [tz.warning, warning].filter((w): w is string => Boolean(w)),
+            configWarnings: [tz.warning, warning, budget.warning].filter((w): w is string => Boolean(w)),
+            budgetMs: budget.postsMs,
+            totalBudgetMs: budget.totalMs,
             now: opts.now,
             sleep: opts.sleep,
             classifier,

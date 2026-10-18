@@ -111,6 +111,8 @@ export interface ChatActivity {
   lastActivity?: string;
   /** Active threads, for publication chats. */
   threads: ThreadActivity[];
+  /** Set when this chat was checked from an earlier cutoff than the call's `since` (`sinceFor`). */
+  since?: string;
 }
 
 export interface ChatActivityResult {
@@ -231,26 +233,36 @@ export class SubstackChat {
    * it was created, or last replied to, after `since`. DMs count by the inbox
    * timestamp. Publication chats quiet for `lookbackDays` before `since` are skipped.
    */
-  async activity(since: Date, { chatId, lookbackDays = 60, maxPages = 3 }: { chatId?: string; lookbackDays?: number; maxPages?: number } = {}): Promise<ChatActivityResult> {
+  async activity(
+    since: Date,
+    { chatId, lookbackDays = 60, maxPages = 3, sinceFor }: { chatId?: string; lookbackDays?: number; maxPages?: number; sinceFor?: (id: string) => Date | undefined } = {},
+  ): Promise<ChatActivityResult> {
     const { items } = await this.inbox();
     const wanted = chatId?.trim().replace(/^direct-message-/, "");
-    const quietBefore = since.getTime() - lookbackDays * 86_400_000;
+    // A chat that couldn't be checked last time is checked from its older cutoff.
+    const from = (id: string): Date => {
+      const own = sinceFor?.(id);
+      return own && own.getTime() < since.getTime() ? own : since;
+    };
     const candidates = items.filter((item) => {
       if (wanted !== undefined && item.id !== wanted) return false;
-      if (item.kind === "direct_message") return timeOf(item.lastActivity) > since.getTime();
+      const start = from(item.id).getTime();
+      if (item.kind === "direct_message") return timeOf(item.lastActivity) > start;
       if (item.kind !== "publication_chat") return false;
-      return item.lastActivity === undefined || timeOf(item.lastActivity) >= quietBefore;
+      return item.lastActivity === undefined || timeOf(item.lastActivity) >= start - lookbackDays * 86_400_000;
     });
 
     const errors: ChatActivityResult["errors"] = [];
     const results = await mapLimit(candidates, 2, async (item): Promise<ChatActivity | null> => {
       const name = item.kind === "direct_message" ? `DM with ${item.title ?? "unknown"}` : (item.publication ?? item.title ?? `publication ${item.id}`);
+      const start = from(item.id);
+      const own = start === since ? {} : { since: start.toISOString() };
       if (item.kind === "direct_message") {
-        return { kind: "direct_message", id: item.id, name, lastActivity: item.lastActivity, threads: [] };
+        return { kind: "direct_message", id: item.id, name, lastActivity: item.lastActivity, threads: [], ...own };
       }
       try {
-        const threads = await this.activeThreads(item.id, since, maxPages);
-        return threads.length ? { kind: "publication_chat", id: item.id, name, lastActivity: item.lastActivity, threads } : null;
+        const threads = await this.activeThreads(item.id, start, maxPages);
+        return threads.length ? { kind: "publication_chat", id: item.id, name, lastActivity: item.lastActivity, threads, ...own } : null;
       } catch (err) {
         if (err instanceof AuthError) throw err;
         errors.push({ id: item.id, name, error: err instanceof Error ? err.message : String(err) });

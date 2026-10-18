@@ -15,7 +15,7 @@ function run(extra: Partial<RunFile> = {}): RunFile {
     since: "2026-10-01T12:00:11Z",
     state_last_run_at_begin: "2026-10-01T12:00:11Z",
     first_run: false,
-    timezone: "America/Denver",
+    timezone: "America/New_York",
     posts: [post(1, "Zeta", { paywalled: true }), post(2, "alpha"), post(3, "Beta"), post(4, "alpha"), post(5, "Beta")],
     chats: [
       { ref: "C1", id: "77", kind: "publication_chat", name: "Nate's Substack", newThreads: 1, repliedThreads: 0 },
@@ -32,10 +32,10 @@ function run(extra: Partial<RunFile> = {}): RunFile {
 
 describe("time formatting", () => {
   it("formats local times with the zone abbreviation", () => {
-    expect(formatLocal("2026-10-02T12:00:24Z", "America/Denver")).toBe("Fri, Oct 2, 6:00 AM MDT");
-    expect(formatLocal("2026-12-02T12:00:24Z", "America/Denver")).toBe("Wed, Dec 2, 5:00 AM MST");
+    expect(formatLocal("2026-10-02T12:00:24Z", "America/New_York")).toBe("Fri, Oct 2, 8:00 AM EDT");
+    expect(formatLocal("2026-12-02T12:00:24Z", "America/New_York")).toBe("Wed, Dec 2, 7:00 AM EST");
     expect(formatLocal("2026-10-02T12:00:24Z", "UTC")).toBe("Fri, Oct 2, 12:00 PM UTC");
-    expect(formatDay("2026-10-02T03:00:00Z", "America/Denver")).toBe("Oct 1");
+    expect(formatDay("2026-10-02T03:00:00Z", "America/New_York")).toBe("Oct 1");
   });
 });
 
@@ -101,7 +101,7 @@ describe("renderDigest", () => {
     ]);
     expect(renderDigest(r, rec)).toBe(
       [
-        "📬 **Substack** — 5 new posts, 2 chats with new activity (since Thu, Oct 1, 6:00 AM MDT)",
+        "📬 **Substack** — 5 new posts, 2 chats with new activity (since Thu, Oct 1, 8:00 AM EDT)",
         "",
         "⭐ **Read in full**",
         "1. **Post 3** — Beta (preview only)",
@@ -154,7 +154,7 @@ describe("renderDigest", () => {
     const text = renderDigest(r, reconcile(r, [], []));
     expect(text).toBe(
       [
-        "📬 **Substack** — 0 new posts, 0 chats with new activity (since Thu, Oct 1, 6:00 AM MDT)",
+        "📬 **Substack** — 0 new posts, 0 chats with new activity (since Thu, Oct 1, 8:00 AM EDT)",
         "",
         "⚠ **Couldn't check**",
         "• The Pragmatic Engineer (HTTP 429) — retrying from Oct 2",
@@ -178,6 +178,6 @@ describe("renderDigest", () => {
 
   it("uses singular nouns for one post and one chat", () => {
     const r = run({ posts: [post(1, "Zeta")], chats: [run().chats[0]!] });
-    expect(renderDigest(r, reconcile(r, [], [])).split("\n")[0]).toBe("📬 **Substack** — 1 new post, 1 chat with new activity (since Thu, Oct 1, 6:00 AM MDT)");
+    expect(renderDigest(r, reconcile(r, [], [])).split("\n")[0]).toBe("📬 **Substack** — 1 new post, 1 chat with new activity (since Thu, Oct 1, 8:00 AM EDT)");
   });
 });

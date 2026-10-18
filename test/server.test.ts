@@ -154,7 +154,7 @@ describe("digest tools", () => {
       body: { id: 3, title: "Second", audience: "everyone", canonical_url: "https://example.substack.com/p/second", body_html: "<p>Second body.</p>" },
     },
   };
-  const connectDigest = () => connect(routes, { digestDir: dir, timezone: "America/Denver", now: () => NOW, sleep: async () => {} });
+  const connectDigest = () => connect(routes, { digestDir: dir, timezone: "America/New_York", now: () => NOW, sleep: async () => {} });
   const runIdOf = (t: string) => t.match(/^RUN_ID: (\S+)$/m)![1]!;
 
   it("are registered only with a digest dir, with the right annotations", async () => {
@@ -196,7 +196,7 @@ describe("digest tools", () => {
         ],
       },
     };
-    const client = await connect(withPodcast, { digestDir: dir, timezone: "America/Denver", now: () => NOW, sleep: async () => {} });
+    const client = await connect(withPodcast, { digestDir: dir, timezone: "America/New_York", now: () => NOW, sleep: async () => {} });
     const beginResult = await client.callTool({ name: "digest_begin", arguments: {} });
     const begin = textOf(beginResult);
     expect(sent).toHaveLength(3);
@@ -240,7 +240,7 @@ describe("digest tools", () => {
     expect(out).toMatch(/^STATE SAVED: yes \(last_run 2026-10-02T12:00:24Z; 3 reported posts; 0 publications pending\)/);
     expect(out).toContain("WARNINGS: none");
     const message = out.split("===== DIGEST: reply with exactly the text below, nothing before or after =====\n")[1]!;
-    expect(message.startsWith("📬 **Substack** — 2 new posts, 0 chats with new activity (since Thu, Oct 1, 6:00 AM MDT)")).toBe(true);
+    expect(message.startsWith("📬 **Substack** — 2 new posts, 0 chats with new activity (since Thu, Oct 1, 8:00 AM EDT)")).toBe(true);
 
     const state = JSON.parse(await readFile(join(dir, "state.json"), "utf8"));
     expect(state.last_run).toBe("2026-10-02T12:00:24Z");
@@ -258,7 +258,7 @@ describe("digest tools", () => {
     expect(textOf(again)).toContain(message);
 
     const status = textOf(await client.callTool({ name: "digest_status", arguments: {} }));
-    expect(status).toContain("LAST RUN: 2026-10-02T12:00:24Z (Fri, Oct 2, 6:00 AM MDT)");
+    expect(status).toContain("LAST RUN: 2026-10-02T12:00:24Z (Fri, Oct 2, 8:00 AM EDT)");
     expect(status).toContain(`- ${runId} |`);
   });
 

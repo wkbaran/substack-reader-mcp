@@ -54,12 +54,30 @@ export function applyRun(state: DigestState, run: RunFile, committedAt: string):
       failures: (existing?.failures ?? 0) + 1,
     };
   }
+  // Chats: only this run's failures stay pending (the rest were checked, or given up on).
+  // Runs from before chat_failures existed leave pending_chats as it was.
+  let pendingChats = state.pending_chats;
+  if (run.chat_failures !== undefined || state.pending_chats) {
+    pendingChats = {};
+    for (const f of run.chat_failures ?? []) {
+      const existing = state.pending_chats?.[f.id];
+      pendingChats[f.id] = {
+        name: f.name,
+        since: existing && Date.parse(existing.since) < Date.parse(f.since) ? existing.since : f.since,
+        error: f.error,
+        failures: (existing?.failures ?? 0) + 1,
+      };
+    }
+  }
   const runs = [...(state.runs ?? []), { run_id: run.run_id, fetch_start: run.fetch_start, committed_at: committedAt, posts: run.posts.length, chats: run.chats.length }].slice(-MAX_RUN_HISTORY);
+  const { pending_chats: _previous, ...rest } = state;
+  void _previous;
   return {
-    ...state,
+    ...rest,
     version: 2,
     last_run: laterIso(state.last_run, run.fetch_start),
     pending_publications: pending,
+    ...(pendingChats && Object.keys(pendingChats).length ? { pending_chats: pendingChats } : {}),
     runs,
     // Every post in the work list counts as reported, including ones that couldn't be read.
     reported_posts: addReported(state.reported_posts, run.posts.map((p) => p.url)).list,

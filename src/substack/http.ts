@@ -1,3 +1,4 @@
+import { pacedFetch, paceFromEnv, RateLimitedError, type PaceOptions } from "paced-fetch";
 import { SESSION_COOKIE, USER_AGENT } from "../config.js";
 
 export class SubstackError extends Error {
@@ -34,15 +35,25 @@ export interface HttpOptions {
   sid?: string;
   fetch?: FetchLike;
   timeoutMs?: number;
-  /** Retries after a network error or a 5xx (GET only). */
+  /** Retries after a 429, or after a network error or 5xx on a GET. Overrides SUBSTACK_RETRIES. */
   maxRetries?: number;
-  /** Retries after a 429. Substack's rate limit needs longer waits than other errors. */
-  maxRetries429?: number;
+  /** Read for SUBSTACK_RATE, SUBSTACK_CONCURRENCY and the rest (see paced-fetch). Defaults to process.env. */
+  env?: NodeJS.ProcessEnv;
   /** Injected so tests don't actually wait on backoff. */
   sleep?: (ms: number) => Promise<void>;
   /** Injected so tests get a predictable jitter. Returns a number in [0, 1). */
   random?: () => number;
 }
+
+/**
+ * Pacing for Substack, which publishes no rate limit. At 6 concurrent requests it
+ * answered 429 to a fifth of the feed, and sub-second backoff wasn't enough to
+ * recover, hence the long backoff (2 s, 5 s, 10 s, with jitter). The digest fetches
+ * 3 publications at a time on top of this. Every value can be changed with
+ * SUBSTACK_RATE, SUBSTACK_CONCURRENCY, SUBSTACK_MIN_GAP, SUBSTACK_RETRIES and
+ * SUBSTACK_MAX_RETRY_WAIT.
+ */
+export const SUBSTACK_PACE: PaceOptions = { retries: 3, backoffMs: [2_000, 5_000, 10_000], maxRetryWaitMs: 60_000 };
 
 const MAX_REDIRECTS = 5;
 
@@ -71,19 +82,19 @@ export class SubstackHttp {
   private readonly customDomains = new Map<string, string | undefined>();
   private readonly hostSessions = new Map<string, Promise<string | null>>();
   private readonly fetchImpl: FetchLike;
-  private readonly timeoutMs: number;
-  private readonly maxRetries: number;
-  private readonly maxRetries429: number;
-  private readonly sleep: (ms: number) => Promise<void>;
-  private readonly random: () => number;
 
   constructor(private readonly opts: HttpOptions = {}) {
-    this.fetchImpl = opts.fetch ?? fetch;
-    this.timeoutMs = opts.timeoutMs ?? 20_000;
-    this.maxRetries = opts.maxRetries ?? 2;
-    this.maxRetries429 = opts.maxRetries429 ?? 3;
-    this.random = opts.random ?? Math.random;
-    this.sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+    const { pace, warnings } = paceFromEnv("SUBSTACK", SUBSTACK_PACE, opts.env);
+    // stdout is the MCP channel; stderr is where hosts show server logs.
+    for (const w of warnings) console.error(w);
+    this.fetchImpl = pacedFetch({
+      fetch: opts.fetch ?? fetch,
+      defaults: { ...pace, ...(opts.maxRetries !== undefined ? { retries: opts.maxRetries } : {}), timeoutMs: opts.timeoutMs ?? 20_000 },
+      // Only GETs are retried after a network error or 5xx: a POST may have gone through.
+      isIdempotent: (method) => method === "GET",
+      sleep: opts.sleep,
+      random: opts.random,
+    }) as FetchLike;
   }
 
   get authenticated(): boolean {
@@ -142,38 +153,14 @@ export class SubstackHttp {
     throw new SubstackError(`Substack returned HTTP ${res.status} for ${url}${detail}`, res.status, url);
   }
 
+  /** One request, paced and retried by paced-fetch; redirects are followed here. */
   private async request(url: string, opts: RequestOptions, accept = "application/json"): Promise<Response> {
-    const method = opts.method ?? "GET";
-    // 429s and other failures are counted separately: each has its own schedule.
-    let retries = 0;
-    let retries429 = 0;
-    for (;;) {
-      let res: Response;
-      try {
-        res = await this.followRedirects(url, method, opts.body, accept);
-      } catch (err) {
-        // Only GETs are retried after network errors: a POST may have gone through.
-        if (method === "GET" && retries < this.maxRetries && isTransient(err)) {
-          await this.sleep(backoff(retries++));
-          continue;
-        }
-        const msg = err instanceof Error ? err.message : String(err);
-        throw new SubstackError(`Request to ${url} failed: ${msg}`, undefined, url);
-      }
-      if (res.status === 429 && retries429 < this.maxRetries429) {
-        // At 6 concurrent requests Substack answered 429 to a fifth of the feed, and
-        // sub-second backoff wasn't enough to recover. Without Retry-After, wait 2 s,
-        // 5 s, then 10 s, with jitter so parallel requests don't retry in lockstep.
-        await res.body?.cancel();
-        await this.sleep(retryAfterMs(res) ?? backoff429(retries429++, this.random));
-        continue;
-      }
-      if (method === "GET" && res.status >= 500 && retries < this.maxRetries) {
-        await res.body?.cancel();
-        await this.sleep(retryAfterMs(res) ?? backoff(retries++));
-        continue;
-      }
-      return res;
+    try {
+      return await this.followRedirects(url, opts.method ?? "GET", opts.body, accept);
+    } catch (err) {
+      if (err instanceof RateLimitedError) throw new SubstackError(`Substack is rate-limiting requests: ${err.message}`, 429, url);
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new SubstackError(`Request to ${url} failed: ${msg}`, undefined, url);
     }
   }
 
@@ -193,7 +180,6 @@ export class SubstackHttp {
         headers,
         body: body === undefined ? undefined : JSON.stringify(body),
         redirect: "manual",
-        signal: AbortSignal.timeout(this.timeoutMs),
       });
       const location = res.headers.get("location");
       // Writes are never replayed against a redirect target; callers use canonical URLs.
@@ -234,7 +220,6 @@ export class SubstackHttp {
     const first = await this.fetchImpl(start, {
       headers: { "User-Agent": USER_AGENT, Accept: "text/html", Cookie: `${SESSION_COOKIE}=${this.opts.sid}` },
       redirect: "manual",
-      signal: AbortSignal.timeout(this.timeoutMs),
     });
     await first.body?.cancel();
     const location = first.headers.get("location");
@@ -245,7 +230,6 @@ export class SubstackHttp {
     const second = await this.fetchImpl(handoff, {
       headers: { "User-Agent": USER_AGENT, Accept: "text/html" },
       redirect: "manual",
-      signal: AbortSignal.timeout(this.timeoutMs),
     });
     await second.body?.cancel();
     const cookie = second.headers
@@ -260,35 +244,9 @@ function isSubstackHost(host: string): boolean {
   return host === "substack.com" || host.endsWith(".substack.com");
 }
 
-function isTransient(err: unknown): boolean {
-  if (!(err instanceof Error)) return false;
-  return err.name === "TimeoutError" || err.name === "AbortError" || /fetch failed|ECONNRESET|ETIMEDOUT|EAI_AGAIN/i.test(err.message + String((err as { cause?: unknown }).cause ?? ""));
-}
-
-function backoff(attempt: number): number {
-  return 500 * 2 ** attempt;
-}
-
-const BACKOFF_429_MS = [2_000, 5_000, 10_000];
-
-/** Wait before retry number `attempt + 1` after a 429 without Retry-After: base plus up to 30% jitter. */
-export function backoff429(attempt: number, random: () => number = Math.random): number {
-  const base = BACKOFF_429_MS[Math.min(attempt, BACKOFF_429_MS.length - 1)]!;
-  return Math.round(base * (1 + 0.3 * random()));
-}
-
 /** Statuses worth trying again later: rate limiting and server errors. */
 export function isRetryableStatus(status: number | undefined): boolean {
   return status === 429 || (status !== undefined && status >= 500);
-}
-
-function retryAfterMs(res: Response): number | null {
-  const value = res.headers.get("retry-after");
-  if (!value) return null;
-  const secs = Number(value);
-  if (Number.isFinite(secs)) return Math.min(secs * 1000, 30_000);
-  const date = Date.parse(value);
-  return Number.isNaN(date) ? null : Math.min(Math.max(date - Date.now(), 0), 30_000);
 }
 
 async function errorDetail(res: Response): Promise<string> {

@@ -1,5 +1,6 @@
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
+import { parseDuration } from "paced-fetch";
 
 /** Root directory for everything this tool persists. Override with SUBSTACK_READER_HOME. */
 export function configDir(): string {
@@ -40,12 +41,15 @@ export function digestDir(): string | undefined {
   return dir;
 }
 
-/** IANA time zone for times shown in digests (SUBSTACK_DIGEST_TZ, default UTC). */
-export function digestTimezone(value = process.env.SUBSTACK_DIGEST_TZ): { timeZone: string; warning?: string } {
-  const tz = value?.trim();
-  if (!tz) return { timeZone: "UTC" };
-  if (isValidTimeZone(tz)) return { timeZone: tz };
-  return { timeZone: "UTC", warning: `SUBSTACK_DIGEST_TZ "${tz}" is not a valid IANA time zone; using UTC.` };
+/** IANA time zone for times shown in digests: SUBSTACK_DIGEST_TZ, else TZ, else UTC. */
+export function digestTimezone(env: NodeJS.ProcessEnv = process.env): { timeZone: string; warning?: string } {
+  for (const name of ["SUBSTACK_DIGEST_TZ", "TZ"] as const) {
+    const tz = env[name]?.trim();
+    if (!tz) continue;
+    if (isValidTimeZone(tz)) return { timeZone: tz };
+    return { timeZone: "UTC", warning: `${name}="${tz}" is not a valid IANA time zone; using UTC.` };
+  }
+  return { timeZone: "UTC" };
 }
 
 export function isValidTimeZone(tz: string): boolean {
@@ -55,6 +59,19 @@ export function isValidTimeZone(tz: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * How long digest_begin may spend fetching (SUBSTACK_DIGEST_FETCH_BUDGET, e.g. "10min").
+ * The default, 250 s, fits an agent host's 300 s tool timeout. Posts get all but
+ * 110 s of it (at least half), which leaves time for chats and the classifier.
+ */
+export function digestFetchBudget(env: NodeJS.ProcessEnv = process.env): { totalMs: number; postsMs: number; warning?: string } {
+  const raw = env.SUBSTACK_DIGEST_FETCH_BUDGET?.trim();
+  const parsed = raw ? parseDuration(raw) : null;
+  const totalMs = parsed && parsed >= 30_000 ? parsed : 250_000;
+  const warning = raw && totalMs !== parsed ? `SUBSTACK_DIGEST_FETCH_BUDGET=${raw} isn't a duration of at least 30 s; using 250 s.` : undefined;
+  return { totalMs, postsMs: Math.max(totalMs - 110_000, Math.round(totalMs / 2)), ...(warning ? { warning } : {}) };
 }
 
 // ---- headline classifier (optional; see docs/classifier.md) ----

@@ -30,6 +30,14 @@ export interface PendingPublication {
   failures: number;
 }
 
+/** A chat that couldn't be checked; the next run checks it from `since`. */
+export interface PendingChat {
+  name: string;
+  since: string;
+  error?: string;
+  failures: number;
+}
+
 export interface RunRecord {
   run_id: string;
   fetch_start: string;
@@ -42,6 +50,8 @@ export interface DigestState {
   version: 2;
   last_run?: string;
   pending_publications: Record<string, PendingPublication>;
+  /** Chats that couldn't be checked, by chat id (absent in older files). */
+  pending_chats?: Record<string, PendingChat>;
   /** Recent committed runs, newest last (for digest_status). */
   runs?: RunRecord[];
   reported_posts: string[];
@@ -79,10 +89,12 @@ export async function loadState(dir: string): Promise<LoadedState> {
       parsed.pending_publications && typeof parsed.pending_publications === "object" && !Array.isArray(parsed.pending_publications)
         ? (parsed.pending_publications as Record<string, PendingPublication>)
         : {};
+    const pendingChats =
+      parsed.pending_chats && typeof parsed.pending_chats === "object" && !Array.isArray(parsed.pending_chats) ? (parsed.pending_chats as Record<string, PendingChat>) : undefined;
     const lastRun = typeof parsed.last_run === "string" && !Number.isNaN(Date.parse(parsed.last_run)) ? parsed.last_run : undefined;
     const warnings = typeof parsed.last_run === "string" && !lastRun ? [`state.json has an unreadable last_run ("${parsed.last_run}"); treating this as a first run.`] : [];
     return {
-      state: { ...parsed, version: 2, last_run: lastRun, pending_publications: pending, reported_posts: reported },
+      state: { ...parsed, version: 2, last_run: lastRun, pending_publications: pending, ...(pendingChats ? { pending_chats: pendingChats } : {}), reported_posts: reported },
       exists: true,
       warnings,
     };

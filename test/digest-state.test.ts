@@ -170,6 +170,9 @@ describe("withLock", () => {
       order.push(`${name}:end`);
     };
     await Promise.all([withLock(dir, slow("a")), withLock(dir, slow("b"))]);
-    expect(order).toEqual(["a:start", "a:end", "b:start", "b:end"]);
+    // Either may get the lock first (it's a race under load); they must not overlap.
+    const first = order[0]!.split(":")[0]!;
+    const second = first === "a" ? "b" : "a";
+    expect(order).toEqual([`${first}:start`, `${first}:end`, `${second}:start`, `${second}:end`]);
   });
 });

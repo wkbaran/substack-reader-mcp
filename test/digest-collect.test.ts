@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { digestBegin, type RunFile } from "../src/digest/collect.js";
+import { applyRun } from "../src/digest/finish.js";
+import { loadState } from "../src/digest/state.js";
 import { SubstackClient } from "../src/substack/api.js";
 import { AuthError, SubstackHttp } from "../src/substack/http.js";
 import { authed, fakeFetch, SID, type Route } from "./helpers.js";
@@ -45,7 +47,7 @@ function setup(routes: Record<string, Route | ((req: never) => Route)>) {
   } as never);
   const sleeps: number[] = [];
   const client = new SubstackClient(new SubstackHttp({ sid: SID, fetch, sleep: async () => {} }));
-  const begin = (opts = {}) => digestBegin({ dir, client, timezone: "America/Denver", now: () => NOW, sleep: async (ms) => void sleeps.push(ms) }, opts);
+  const begin = (opts = {}) => digestBegin({ dir, client, timezone: "America/New_York", now: () => NOW, sleep: async (ms) => void sleeps.push(ms) }, opts);
   return { begin, requests, sleeps };
 }
 
@@ -73,9 +75,9 @@ describe("digestBegin", () => {
     ]);
     expect(run).toMatchObject({ fetch_start: "2026-10-02T12:00:24Z", since: LAST, state_last_run_at_begin: LAST, first_run: false });
     expect(text).toMatch(/^RUN_ID: 20261002-120024-[0-9a-f]{4}$/m);
-    expect(text).toContain("SINCE: 2026-10-01T12:00:11Z (Thu, Oct 1, 6:00 AM MDT)");
-    expect(text).toContain("P1 | beta 4 | Beta | Oct 2, 5:00 AM | free | podcast | https://beta.substack.com/p/post-4");
-    expect(text).toContain("P2 | alpha 1 | Alpha | Oct 2, 4:00 AM | paid | newsletter | https://alpha.substack.com/p/post-1");
+    expect(text).toContain("SINCE: 2026-10-01T12:00:11Z (Thu, Oct 1, 8:00 AM EDT)");
+    expect(text).toContain("P1 | beta 4 | Beta | Oct 2, 7:00 AM | free | podcast | https://beta.substack.com/p/post-4");
+    expect(text).toContain("P2 | alpha 1 | Alpha | Oct 2, 6:00 AM | paid | newsletter | https://alpha.substack.com/p/post-1");
     expect(text).toMatch(/NEXT: .*digest_finish/);
     expect(await readFile(join(dir, "state.json"), "utf8")).toBe(before);
     expect((await readdir(dir)).sort()).toEqual(["current_run.json", "state.json"]);
@@ -175,6 +177,36 @@ describe("digestBegin", () => {
     expect(text).toContain(`C1 | 77 | Nate's Substack | 0 new threads, 1 thread with new replies | {"since":"${LAST}","chat_id":"77","transcripts":true}`);
   });
 
+  it("keeps a chat it couldn't check pending, and checks it from the old cutoff next run", async () => {
+    const inbox = authed({ threads: [{ type: "chat", id: "chat-77", title: "Nate", timestamp: "2026-10-01T10:00:00Z", publication: { id: 77, name: "Nate's Substack" } }] });
+    // Run 1: the chat's thread list keeps failing.
+    const failing = setup({ "https://substack.com/api/v1/messages/inbox?tab=all": inbox, "https://substack.com/api/v1/community/publications/77/posts": { status: 500 } });
+    await writeState({ last_run: LAST, reported_posts: [] });
+    const first = await failing.begin();
+    expect(first.run.chat_failures).toEqual([{ id: "77", name: "Nate's Substack", since: LAST, error: expect.stringContaining("HTTP 500") }]);
+    expect(first.text).toContain("(retried next run)");
+    const after1 = applyRun((await loadState(dir)).state, first.run, "2026-10-02T12:05:00Z");
+    expect(after1.pending_chats).toEqual({ "77": { name: "Nate's Substack", since: LAST, error: expect.stringContaining("HTTP 500"), failures: 1 } });
+
+    // Run 2, later: a reply posted between the two runs is still found, and the arguments use the old cutoff.
+    await writeState({ ...after1, last_run: "2026-10-02T12:00:24Z" });
+    const { rm } = await import("node:fs/promises");
+    await rm(join(dir, "current_run.json"));
+    const ok = setup({
+      "https://substack.com/api/v1/messages/inbox?tab=all": inbox,
+      "https://substack.com/api/v1/community/publications/77/posts": authed({
+        threads: [{ communityPost: { id: "t1", created_at: "2026-09-20T00:00:00Z", most_recent_comment_created_at: "2026-10-02T00:49:00Z", comment_count: 4 } }],
+        moreBefore: false,
+      }),
+    });
+    const second = await ok.begin();
+    expect(second.run.chats).toEqual([{ ref: "C1", id: "77", kind: "publication_chat", name: "Nate's Substack", newThreads: 0, repliedThreads: 1, since: LAST }]);
+    expect(second.work.chats[0]!.arguments.since).toBe(LAST);
+    expect(second.text).toContain("Re-checking Nate's Substack's chat from");
+    const after2 = applyRun((await loadState(dir)).state, second.run, "2026-10-03T12:05:00Z");
+    expect(after2.pending_chats).toBeUndefined();
+  });
+
   it("includes interests.md", async () => {
     await writeFile(join(dir, "interests.md"), "AI research, economics");
     const { begin } = setup({});
@@ -221,7 +253,7 @@ describe("digestBegin", () => {
       [archive("gone")]: { status: 404 },
     } as never);
     const client = new SubstackClient(new SubstackHttp({ sid: SID, fetch, sleep: async () => {} }));
-    const second = await digestBegin({ dir, client, timezone: "America/Denver", now: () => later }, {});
+    const second = await digestBegin({ dir, client, timezone: "America/New_York", now: () => later }, {});
     expect(second.run.run_id).not.toBe(first.run.run_id);
     expect(second.text).toContain(`Run ${first.run.run_id} (started 2026-10-02T12:00:24Z) never finished`);
   });

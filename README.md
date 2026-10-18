@@ -141,7 +141,7 @@ A worked example of a whole run, with each tool's arguments and output: [docs/di
        env:
          SUBSTACK_READER_HOME: /opt/data/mcp/substack-reader-home
          SUBSTACK_DIGEST_DIR: /opt/data/sandbox/substack_digest   # absolute; created if needed
-         SUBSTACK_DIGEST_TZ: America/Denver
+         SUBSTACK_DIGEST_TZ: America/New_York
          # SUBSTACK_CLASSIFIER: jev                               # optional; see below
          # SUBSTACK_JEV_API_KEY: ${JEV_OPENROUTER_API_KEY}        # from Hermes's .env
          # SUBSTACK_JEV_URL: https://openrouter.ai/api/alpha/decisions   # the default; any decisions-API endpoint
@@ -211,13 +211,16 @@ Everything about it is in **[docs/classifier.md](docs/classifier.md)**.
 | `SUBSTACK_USERNAME` | When logged out, `list_subscriptions` shows this user's public subscriptions |
 | `SUBSTACK_COOKIES_PATH` | A Cookie-Editor export from the original Python version, read as a fallback |
 | `SUBSTACK_DIGEST_DIR` | Absolute path of the digest directory; setting it turns on the digest tools |
-| `SUBSTACK_DIGEST_TZ` | Time zone for digest and chat times (default UTC) |
+| `SUBSTACK_DIGEST_TZ` | Time zone for digest and chat times (default `TZ`, else UTC) |
 | `SUBSTACK_CLASSIFIER` | `off` (default), `jev` or `sampling` |
 | `SUBSTACK_JEV_URL` | Decisions-API endpoint for `jev` (default OpenRouter's) |
 | `SUBSTACK_JEV_API_KEY` | Bearer token for that endpoint (default `OPENROUTER_API_KEY`) |
 | `SUBSTACK_JEV_MODEL` | Model id (default `typesafe/jev-1.13`) |
 | `SUBSTACK_DIGEST_SKIP_THRESHOLD` | Skip probability at which a post is set aside (default 0.7) |
 | `SUBSTACK_DIGEST_RANK_FLOOR` | Rank below which reading a post is optional (default off) |
+| `SUBSTACK_DIGEST_FETCH_BUDGET` | How long `digest_begin` may spend fetching (default `250s`, which fits a 300 s agent tool timeout). Raise it where the client waits longer, e.g. `10min` |
+| `SUBSTACK_RATE`, `SUBSTACK_CONCURRENCY`, `SUBSTACK_MIN_GAP` | Pacing of requests to Substack, e.g. `60/min`, `2`, `250ms` (default: no rate cap; the digest fetches 3 publications at a time). See [paced-fetch](https://github.com/wkbaran/paced-fetch) |
+| `SUBSTACK_RETRIES`, `SUBSTACK_MAX_RETRY_WAIT` | Retries after a 429 (or a 5xx or network error on a GET), waiting 2 s, 5 s, then 10 s or Substack's `Retry-After`; and the longest `Retry-After` worth waiting (default `3`, `60s`; longer fails at once) |
 
 </details>
 

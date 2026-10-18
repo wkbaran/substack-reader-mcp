@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AuthError, backoff429, isRetryableStatus, SubstackError, SubstackHttp } from "../src/substack/http.js";
+import { AuthError, isRetryableStatus, SubstackError, SubstackHttp } from "../src/substack/http.js";
 import { fakeFetch, SID } from "./helpers.js";
 
 const noSleep = async () => {};
@@ -147,42 +147,51 @@ describe("SubstackHttp errors", () => {
   });
 });
 
-describe("SubstackHttp 429 backoff", () => {
-  it("waits 2 s, 5 s, then 10 s without Retry-After, then gives up", async () => {
+describe("SubstackHttp pacing and retries (paced-fetch)", () => {
+  // The fake sleep doesn't move the clock, so the short gap a 429 adds between
+  // requests shows up as extra waits; in real time it falls inside the backoff.
+  const backoffs = (waits: number[]) => waits.filter((w) => w >= 2000);
+
+  it("waits 2 s, 5 s, then 10 s after 429s without Retry-After, then gives up", async () => {
     let n = 0;
     const { fetch } = fakeFetch({ "https://substack.com/x": () => (n++, { status: 429 }) });
     const waits: number[] = [];
-    const http = new SubstackHttp({ fetch, sleep: async (ms) => void waits.push(ms), random: () => 0 });
+    const http = new SubstackHttp({ fetch, env: {}, sleep: async (ms) => void waits.push(ms), random: () => 0 });
     const err = await rejection(http.getJson("https://substack.com/x"));
     expect(err).toBeInstanceOf(SubstackError);
     expect(err.status).toBe(429);
-    expect(waits).toEqual([2000, 5000, 10000]);
+    expect(backoffs(waits)).toEqual([2000, 5000, 10000]);
     expect(n).toBe(4);
   });
 
-  it("adds up to 30% jitter", () => {
-    expect(backoff429(0, () => 0.999)).toBe(2599);
-    expect(backoff429(2, () => 0.5)).toBe(11500);
-    expect(backoff429(7, () => 0)).toBe(10000);
-  });
-
-  it("honors Retry-After, capped at 30 s", async () => {
+  it("fails at once on a Retry-After over a minute, without sending more", async () => {
     let n = 0;
-    const { fetch } = fakeFetch({
-      "https://substack.com/x": () => (++n === 1 ? { status: 429, headers: { "retry-after": "120" } } : { body: { ok: true } }),
-    });
-    const waits: number[] = [];
-    const http = new SubstackHttp({ fetch, sleep: async (ms) => void waits.push(ms) });
-    expect(await http.getJson("https://substack.com/x")).toEqual({ ok: true });
-    expect(waits).toEqual([30000]);
+    const { fetch } = fakeFetch({ "https://substack.com/x": () => (++n, { status: 429, headers: { "retry-after": "120" } }) });
+    const http = new SubstackHttp({ fetch, env: {}, sleep: async () => {} });
+    const err = await rejection(http.getJson("https://substack.com/x"));
+    expect(err.status).toBe(429);
+    expect(err.message).toMatch(/Substack is rate-limiting requests: substack\.com is rate-limiting requests until/);
+    await rejection(http.getJson("https://substack.com/x"));
+    expect(n).toBe(1);
   });
 
-  it("keeps the short schedule for 5xx", async () => {
-    const { fetch } = fakeFetch({ "https://substack.com/x": { status: 502 } });
+  it("retries a 5xx GET on the same schedule, but not a POST", async () => {
+    const { fetch, requests } = fakeFetch({ "https://substack.com/x": { status: 502 } });
     const waits: number[] = [];
-    const http = new SubstackHttp({ fetch, sleep: async (ms) => void waits.push(ms) });
+    const http = new SubstackHttp({ fetch, env: {}, sleep: async (ms) => void waits.push(ms), random: () => 0 });
     await expect(http.getJson("https://substack.com/x")).rejects.toThrow(/HTTP 502/);
-    expect(waits).toEqual([500, 1000]);
+    expect(backoffs(waits)).toEqual([2000, 5000, 10000]);
+    const before = requests.length;
+    await expect(http.sendJson("POST", "https://substack.com/x", {})).rejects.toThrow(/HTTP 502/);
+    expect(requests.length - before).toBe(1);
+  });
+
+  it("reads SUBSTACK_RETRIES and the other paced-fetch variables", async () => {
+    let n = 0;
+    const { fetch } = fakeFetch({ "https://substack.com/x": () => (n++, { status: 429 }) });
+    const http = new SubstackHttp({ fetch, env: { SUBSTACK_RETRIES: "1" }, sleep: async () => {} });
+    await rejection(http.getJson("https://substack.com/x"));
+    expect(n).toBe(2);
   });
 
   it("classifies retryable statuses", () => {

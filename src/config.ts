@@ -83,6 +83,32 @@ function envNumber(name: string, fallback: number, min: number, max: number): nu
   return Number.isFinite(n) && n >= min && n <= max ? n : fallback;
 }
 
+/** Lengths digest_finish allows, in characters; longer text is cut at a clause or word break, with a warning. */
+export interface DigestLimits {
+  /** A post's gist. */
+  gist: number;
+  /** A pick's why line. */
+  why: number;
+  /** A chat's topics. */
+  topics: number;
+  /** A chat's question or mention for the user. */
+  forUser: number;
+}
+
+/**
+ * SUBSTACK_DIGEST_GIST_MAX (500), _WHY_MAX (300), _TOPICS_MAX (500) and
+ * _FOR_USER_MAX (300). The values are also written into digest_finish's argument
+ * descriptions and returned by digest_begin, so a client's prompt can use them.
+ */
+export function digestLimits(): DigestLimits {
+  return {
+    gist: Math.round(envNumber("SUBSTACK_DIGEST_GIST_MAX", 500, 60, 2000)),
+    why: Math.round(envNumber("SUBSTACK_DIGEST_WHY_MAX", 300, 40, 1000)),
+    topics: Math.round(envNumber("SUBSTACK_DIGEST_TOPICS_MAX", 500, 60, 2000)),
+    forUser: Math.round(envNumber("SUBSTACK_DIGEST_FOR_USER_MAX", 300, 40, 1000)),
+  };
+}
+
 /** Posts the classifier gives a skip probability at or above this are dropped (SUBSTACK_DIGEST_SKIP_THRESHOLD). */
 export function digestSkipThreshold(): number {
   return envNumber("SUBSTACK_DIGEST_SKIP_THRESHOLD", 0.7, 0, 1);

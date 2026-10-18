@@ -219,6 +219,7 @@ Everything about it is in **[docs/classifier.md](docs/classifier.md)**.
 | `SUBSTACK_DIGEST_SKIP_THRESHOLD` | Skip probability at which a post is set aside (default 0.7) |
 | `SUBSTACK_DIGEST_RANK_FLOOR` | Rank below which reading a post is optional (default off) |
 | `SUBSTACK_DIGEST_FETCH_BUDGET` | How long `digest_begin` may spend fetching (default `250s`, which fits a 300 s agent tool timeout). Raise it where the client waits longer, e.g. `10min` |
+| `SUBSTACK_DIGEST_GIST_MAX`, `_WHY_MAX`, `_TOPICS_MAX`, `_FOR_USER_MAX` | Longest gist, why line, chat topics and chat question for you, in characters (default `500`, `300`, `500`, `300`). Longer text is cut at a clause or word break, with a warning. The values are written into `digest_finish`'s argument descriptions and returned by `digest_begin` (`limits`), so the model or job is told the same numbers |
 | `SUBSTACK_RATE`, `SUBSTACK_CONCURRENCY`, `SUBSTACK_MIN_GAP` | Pacing of requests to Substack, e.g. `60/min`, `2`, `250ms` (default: no rate cap; the digest fetches 3 publications at a time). See [paced-fetch](https://github.com/wkbaran/paced-fetch) |
 | `SUBSTACK_RETRIES`, `SUBSTACK_MAX_RETRY_WAIT` | Retries after a 429 (or a 5xx or network error on a GET), waiting 2 s, 5 s, then 10 s or Substack's `Retry-After`; and the longest `Retry-After` worth waiting (default `3`, `60s`; longer fails at once) |
 

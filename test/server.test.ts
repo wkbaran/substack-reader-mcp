@@ -224,6 +224,30 @@ describe("digest tools", () => {
     expect(textOf(await client.callTool({ name: "digest_status", arguments: {} }))).toContain("CLASSIFIER CONFIG: jev (typesafe/jev-1.13) · skip threshold 70% · rank floor 30%");
   });
 
+  it("takes its length limits from env, states them in digest_finish's description, returns them, and cuts to them", async () => {
+    process.env.SUBSTACK_DIGEST_WHY_MAX = "60";
+    process.env.SUBSTACK_DIGEST_GIST_MAX = "80";
+    try {
+      const client = await connectDigest();
+      const described = JSON.stringify((await client.listTools()).tools.find((t) => t.name === "digest_finish")!.inputSchema);
+      expect(described).toContain("≤80 characters");
+      expect(described).toContain("≤60 characters");
+      expect(described).toContain("≤500 characters"); // topics, still the default
+      const begin = await client.callTool({ name: "digest_begin", arguments: {} });
+      expect((begin.structuredContent as { limits: unknown }).limits).toEqual({ gist: 80, why: 60, topics: 500, for_user: 300 });
+      const long = "word ".repeat(40).trim();
+      const out = textOf(
+        await client.callTool({ name: "digest_finish", arguments: { run_id: runIdOf(textOf(begin)), posts: [{ ref: "P1", section: "pick", gist: long, why: long }], chats: [], dry_run: true } }),
+      );
+      expect(out).toContain("P1 gist cut to 80 characters.");
+      expect(out).toContain("P1 why cut to 60 characters.");
+      expect(out).not.toMatch(/wor…/); // cut at a word break
+    } finally {
+      delete process.env.SUBSTACK_DIGEST_WHY_MAX;
+      delete process.env.SUBSTACK_DIGEST_GIST_MAX;
+    }
+  });
+
   it("runs begin -> finish, saves state, and repeats the result for the same run_id", async () => {
     const client = await connectDigest();
     const begin = textOf(await client.callTool({ name: "digest_begin", arguments: {} }));

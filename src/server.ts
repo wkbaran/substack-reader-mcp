@@ -8,7 +8,7 @@ import { renderPost } from "./format.js";
 import { SubstackClient } from "./substack/api.js";
 import { renderChatActivity, renderMessages, renderThread, SubstackChat } from "./substack/chat.js";
 import { AuthError, SubstackHttp, type FetchLike } from "./substack/http.js";
-import { digestDir as envDigestDir, digestFetchBudget, digestRankFloor, digestSkipThreshold, digestTimezone } from "./config.js";
+import { digestDir as envDigestDir, digestFetchBudget, digestLimits, digestRankFloor, digestSkipThreshold, digestTimezone } from "./config.js";
 import { renderEvidence } from "./classifier/evidence.js";
 import { classifierFromEnv, samplingFn } from "./classifier/index.js";
 import { proposalSummary, tidyProposal } from "./classifier/proposal.js";
@@ -18,7 +18,7 @@ import { digestBegin } from "./digest/collect.js";
 import { digestFinish, digestStatus, isPostRef, markReported, resolvePostRef } from "./digest/finish.js";
 import { formatLocal, parseSince } from "./time.js";
 
-const VERSION = "0.6.0";
+const VERSION = "0.7.0";
 
 /**
  * Hands out a client for the current credentials. Credentials are re-read on
@@ -516,10 +516,15 @@ const workListShape = {
   ),
   interests: z.string(),
   warnings: z.array(z.string()),
+  limits: z
+    .object({ gist: z.number(), why: z.number(), topics: z.number(), for_user: z.number() })
+    .describe("What digest_finish accepts, in characters; longer text is cut, with a warning."),
 };
 
 function registerDigestTools(server: McpServer, provider: ClientProvider, dir: string, tz: { timeZone: string; warning?: string }, opts: ServerOptions): void {
   const lenientBool = z.union([z.boolean(), z.string()]).optional();
+  // Read once, so the descriptions, digest_begin's data and digest_finish's cuts agree.
+  const limits = digestLimits();
 
   server.registerTool(
     "digest_begin",
@@ -559,7 +564,7 @@ function registerDigestTools(server: McpServer, provider: ClientProvider, dir: s
           },
           { maxPosts: max_posts, includeChats: include_chats, firstRunLookback: first_run_lookback },
         );
-        return { content: [{ type: "text", text: out }], structuredContent: { ...work } };
+        return { content: [{ type: "text", text: out }], structuredContent: { ...work, limits: { gist: limits.gist, why: limits.why, topics: limits.topics, for_user: limits.forUser } } };
       }),
   );
 
@@ -580,8 +585,8 @@ function registerDigestTools(server: McpServer, provider: ClientProvider, dir: s
               ref: z.string().optional().describe('Post ref from digest_begin, e.g. "P3".'),
               url: z.string().optional().describe("The post URL, if you don't have the ref."),
               section: z.string().describe('"pick" (read in full), "other" (everything else), or "unreadable" (read_post failed).'),
-              gist: z.string().optional().describe("1–2 sentences: the actual argument or findings."),
-              why: z.string().optional().describe("For picks: one sentence on why it's worth reading in full."),
+              gist: z.string().optional().describe(`1–2 sentences: the actual argument or findings (≤${limits.gist} characters).`),
+              why: z.string().optional().describe(`For picks: one sentence on why it's worth reading in full (≤${limits.why} characters).`),
               preview_only: lenientBool.describe("true when read_post returned only a preview."),
               error: z.string().optional().describe("For unreadable posts: the error."),
             }),
@@ -592,8 +597,8 @@ function registerDigestTools(server: McpServer, provider: ClientProvider, dir: s
           .array(
             z.object({
               id: z.string().describe("Chat id from digest_begin."),
-              topics: z.string().optional().describe("1–3 sentences on what's being discussed."),
-              for_user: z.string().optional().describe('Any question or mention directed at the user, else "none".'),
+              topics: z.string().optional().describe(`1–3 sentences on what's being discussed (≤${limits.topics} characters).`),
+              for_user: z.string().optional().describe(`Any question or mention directed at the user, else "none" (≤${limits.forUser} characters).`),
             }),
           )
           .default([]),
@@ -607,7 +612,7 @@ function registerDigestTools(server: McpServer, provider: ClientProvider, dir: s
         const result = await digestFinish(
           dir,
           { runId: run_id, posts, chats, render, dryRun: dry_run },
-          { now: opts.now },
+          { now: opts.now, limits },
         );
         return { content: [{ type: "text", text: result.text }], ...(result.isError ? { isError: true } : {}) };
       }),

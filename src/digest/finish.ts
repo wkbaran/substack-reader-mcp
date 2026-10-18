@@ -1,4 +1,5 @@
 import { isoSeconds, laterIso } from "job-ledger";
+import type { DigestLimits } from "../config.js";
 import type { RunFile, RunPost } from "./collect.js";
 import { reconcile, renderDigest, renderStatus, type ChatJudgment, type PostJudgment, type Reconciled } from "./render.js";
 import {
@@ -119,7 +120,7 @@ export async function resolvePostRef(dir: string, ref: string): Promise<RunPost>
   return post;
 }
 
-export async function digestFinish(dir: string, args: FinishArgs, { now = Date.now }: { now?: () => number } = {}): Promise<ToolText> {
+export async function digestFinish(dir: string, args: FinishArgs, { now = Date.now, limits }: { now?: () => number; limits?: DigestLimits } = {}): Promise<ToolText> {
   const work = async (): Promise<ToolText> => {
     const current = await readRun(dir, FILES.currentRun);
     if (!current || !sameId(current.run_id, args.runId)) {
@@ -146,7 +147,7 @@ export async function digestFinish(dir: string, args: FinishArgs, { now = Date.n
       };
     }
 
-    const rec = reconcile(current, args.posts, args.chats);
+    const rec = reconcile(current, args.posts, args.chats, limits);
     const markdown = args.render ?? true;
     let message = renderDigest(current, rec, { markdown });
     const warnings = [...rec.warnings];

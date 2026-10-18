@@ -1,3 +1,4 @@
+import type { DigestLimits } from "../config.js";
 import { normalizePostUrl } from "../substack/api.js";
 import { formatDay, formatLocal } from "../time.js";
 import type { RunChat, RunFile, RunPost } from "./collect.js";
@@ -59,14 +60,18 @@ export interface Reconciled {
 
 const RANK: Record<Section, number> = { pick: 3, other: 2, unreadable: 1 };
 
+/** The defaults of digestLimits() in config.ts. */
+export const DEFAULT_LIMITS: DigestLimits = { gist: 500, why: 300, topics: 500, forUser: 300 };
+
 /**
  * Match the model's entries to the run. Lenient on purpose: refs are
  * case-insensitive ("p3", "3" or the URL), duplicates resolve to the strongest
  * section (pick > other > unreadable), unknown refs are dropped, and posts with no
  * entry are listed as not summarized. Each correction adds a warning.
  */
-export function reconcile(run: RunFile, posts: PostJudgment[], chats: ChatJudgment[]): Reconciled {
+export function reconcile(run: RunFile, posts: PostJudgment[], chats: ChatJudgment[], limits: DigestLimits = DEFAULT_LIMITS): Reconciled {
   const warnings: string[] = [];
+  const fit = cutter(warnings);
   const byRef = new Map(run.posts.map((p) => [p.ref.toUpperCase(), p]));
   const byUrl = new Map(run.posts.map((p) => [normalizePostUrl(p.url), p]));
   const chosen = new Map<RunPost, { entry: PostEntry; order: number }>();
@@ -77,7 +82,7 @@ export function reconcile(run: RunFile, posts: PostJudgment[], chats: ChatJudgme
       warnings.push(`Ignored an entry for an unknown post (${j.ref ?? j.url ?? "no ref"}).`);
       return;
     }
-    const entry = toEntry(post, j, warnings);
+    const entry = toEntry(post, j, warnings, fit, limits);
     const prev = chosen.get(post);
     if (prev) {
       if (RANK[entry.section] > RANK[prev.entry.section]) chosen.set(post, { entry: merge(entry, prev.entry), order });
@@ -104,8 +109,8 @@ export function reconcile(run: RunFile, posts: PostJudgment[], chats: ChatJudgme
       continue;
     }
     if (chatEntries.has(chat)) warnings.push(`Chat ${chat.name} was listed more than once; kept the last entry.`);
-    const forUser = clip(j.for_user, 300);
-    chatEntries.set(chat, { chat, topics: clip(j.topics, 500), forUser: forUser && !/^(none|no|n\/a|nothing|-)\.?$/i.test(forUser) ? forUser : undefined });
+    const forUser = fit(j.for_user, limits.forUser, `${chat.name} for_user`);
+    chatEntries.set(chat, { chat, topics: fit(j.topics, limits.topics, `${chat.name} topics`), forUser: forUser && !/^(none|no|n\/a|nothing|-)\.?$/i.test(forUser) ? forUser : undefined });
   }
   const missingChats = run.chats.filter((c) => !chatEntries.has(c));
   if (missingChats.length) warnings.push(`${missingChats.length} chat${missingChats.length === 1 ? " has" : "s have"} no entry (${missingChats.map((c) => c.name).join(", ")}).`);
@@ -144,7 +149,29 @@ function findChat(j: ChatJudgment, chats: RunChat[]): RunChat | undefined {
   return chats.find((c) => values.some((v) => v === c.id.toLowerCase() || v === c.ref.toLowerCase() || v === c.name.toLowerCase()));
 }
 
-function toEntry(post: RunPost, j: PostJudgment, warnings: string[]): PostEntry {
+type Fit = (text: string | undefined, max: number, what: string) => string | undefined;
+
+/** Flattens whitespace and cuts text over `max` at a clause or word break, noting each cut in `warnings`. */
+function cutter(warnings: string[]): Fit {
+  return (text, max, what) => {
+    const flat = clip(text, Number.MAX_SAFE_INTEGER);
+    if (!flat || flat.length <= max) return flat;
+    warnings.push(`${what} cut to ${max} characters.`);
+    return shorten(flat, max);
+  };
+}
+
+/** Cut at the last clause break past 60% of `n`, else the last space, never mid-word. */
+export function shorten(t: string, n: number): string {
+  if (t.length <= n) return t;
+  const room = t.slice(0, n - 1);
+  const clause = Math.max(...[". ", "; ", ": ", ", ", " — ", " - "].map((sep) => room.lastIndexOf(sep)));
+  if (clause >= n * 0.6) return room.slice(0, clause).replace(/[\s,;:—-]+$/, "") + (room[clause] === "." ? "." : "…");
+  const space = room.lastIndexOf(" ");
+  return (space > 0 ? room.slice(0, space) : room).replace(/[\s,;:—-]+$/, "") + "…";
+}
+
+function toEntry(post: RunPost, j: PostJudgment, warnings: string[], fit: Fit, limits: DigestLimits): PostEntry {
   const raw = (j.section ?? "").trim().toLowerCase();
   let section: Section;
   if (["pick", "picks", "read in full", "read", "star", "top"].includes(raw)) section = "pick";
@@ -158,8 +185,8 @@ function toEntry(post: RunPost, j: PostJudgment, warnings: string[]): PostEntry 
   return {
     post,
     section,
-    gist: clip(j.gist, 500),
-    why: clip(j.why, 300),
+    gist: fit(j.gist, limits.gist, `${post.ref} gist`),
+    why: fit(j.why, limits.why, `${post.ref} why`),
     previewOnly,
     error: section === "unreadable" ? (clip(j.error, 150) ?? "couldn't read") : undefined,
   };

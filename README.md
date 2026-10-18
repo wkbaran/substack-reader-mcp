@@ -11,7 +11,7 @@
 ![Jev](https://img.shields.io/badge/ranking-Jev%20decision%20model-orange)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 
-[Quick start](#quick-start) · [Tools](#tools) · [Daily digest](#daily-digest-with-hermes-agent) · [Headline ranking with Jev](#headline-ranking-with-jev) · [Logging in](#logging-in) · [Troubleshooting](#troubleshooting)
+[Quick start](#quick-start) · [Tools](#tools) · [Daily digest](#daily-digest) · [Headline ranking with Jev](#headline-ranking-with-jev) · [Logging in](#logging-in) · [Troubleshooting](#troubleshooting)
 
 </div>
 
@@ -21,7 +21,7 @@ An MCP server for your own Substack account:
 - **Your reading activity:** reading history with how far you read each post, plus saved and hearted posts.
 - **Chats:** publication chats and direct messages.
 - **Act, when you ask:** subscribe to and unsubscribe from free newsletters.
-- **Daily digest:** with [Hermes Agent](https://github.com/NousResearch/hermes-agent), a scheduled morning digest. [Jev](#headline-ranking-with-jev) can rank posts against your interests before they're read.
+- **Daily digest:** a scheduled morning digest, run by a standalone job such as [substack-digest](https://github.com/wkbaran/substack-digest) or by an agent such as [Hermes Agent](https://github.com/NousResearch/hermes-agent). [Jev](#headline-ranking-with-jev) can rank posts against your interests before they're read.
 - **No API keys for Substack:** you log in once in a browser window.
 
 ## What it uses
@@ -116,19 +116,24 @@ How to name things:
 
 A worked example of a whole run, with each tool's arguments and output: [docs/digest-tools.md](docs/digest-tools.md).
 
-## Daily digest with Hermes Agent
+## Daily digest
 
-[Hermes Agent](https://github.com/NousResearch/hermes-agent) runs skills on a schedule and delivers to Discord and other chats. [`hermes/SKILL.md`](hermes/SKILL.md) turns this server into a morning digest:
+The digest tools turn this server into a morning digest. Two ways to run it:
+
+- **[substack-digest](https://github.com/wkbaran/substack-digest)**, a plain scheduled job (Docker and supercronic) that drives this server over MCP, asks an OpenAI-compatible gateway narrow questions and posts to a Discord webhook. This is how I run it.
+- **[Hermes Agent](https://github.com/NousResearch/hermes-agent)**, which runs skills on a schedule and delivers to Discord and other chats, with the skill in [`hermes/SKILL.md`](hermes/SKILL.md). The setup is below.
+
+Either way:
 
 - **What it covers:** every new post in your subscriptions, plus chats and DMs with new activity.
-- **How it reads:** subagents read every post in full.
+- **How it reads:** every post is read in full (by subagents, under Hermes).
 - **What you get:** one message, with:
   - picks worth reading in full, each with a summary and a reason
   - everything else, grouped by publication
   - chats, with anything addressed to you first
 - **What the model does:** only the judging. Fetching, retries, state and layout are code, so the whole digest can run on a local 27B model. State files and locks use [job-ledger](https://www.npmjs.com/package/job-ledger).
 
-**Setup**
+### Setup with Hermes Agent
 
 1. **Build** (`npm ci && npm run build`) and copy `dist/`, `package.json` and `package-lock.json` to where Hermes can see them, e.g. `/opt/data/mcp/substack-reader-mcp`. Then run `npm ci --omit=dev --omit=optional` there.
 2. **Log in** on a machine with a browser (`substack-reader-mcp login`), then copy `~/.config/substack-reader/auth.json` to the Hermes host, e.g. `/opt/data/mcp/substack-reader-home/`.

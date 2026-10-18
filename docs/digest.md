@@ -31,9 +31,9 @@ An unattended, scheduled digest is a different job from a person chatting: nobod
   - `## Skip`: kinds of post you never want. Only used when the classifier is on.
   - A file without these headings still works; all of it counts as Interests.
   - [Draft one from your activity](classifier.md#proposing-an-interestsmd-from-your-activity).
-- **Chunk size** (5 posts per subagent) is a plain instruction in `hermes/SKILL.md`. `digest_begin` takes `max_posts` (default 100); the rest carry over to the next run.
+- **Chunk size** (5 posts per subagent) is a plain instruction in the Hermes skill, `hermes/SKILL.md`. `digest_begin` takes `max_posts` (default 100); the rest carry over to the next run.
 - **Output:** Discord Markdown (`renderDigest` in `src/digest/render.ts`). `digest_finish` with `render: false` returns plain-text sections.
-- **Schedule and delivery:** `hermes cron edit <job-id> --schedule "…"` or `--deliver …`.
+- **Schedule and delivery** are the runner's. With Hermes: `hermes cron edit <job-id> --schedule "…"` or `--deliver …`.
 
 ## Things to know
 

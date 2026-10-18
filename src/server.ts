@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { isoSeconds } from "job-ledger";
 import { z } from "zod";
 import { loadCredentials, type Credentials } from "./auth/credentials.js";
 import { renderPost } from "./format.js";
@@ -15,7 +16,7 @@ import { gatherEvidence } from "./digest/evidence.js";
 import { atomicWrite, readDigestFile } from "./digest/state.js";
 import { digestBegin } from "./digest/collect.js";
 import { digestFinish, digestStatus, isPostRef, markReported, resolvePostRef } from "./digest/finish.js";
-import { formatLocal, isoSeconds, parseSince } from "./time.js";
+import { formatLocal, parseSince } from "./time.js";
 
 const VERSION = "0.4.1";
 

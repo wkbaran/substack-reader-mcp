@@ -11,11 +11,6 @@ export function parseSince(since: string | undefined, now = Date.now()): Date | 
   return new Date(t);
 }
 
-/** ISO time without milliseconds: 2026-10-02T12:00:24Z. */
-export function isoSeconds(d: Date | number): string {
-  return new Date(d).toISOString().replace(/\.\d{3}Z$/, "Z");
-}
-
 function clean(s: string): string {
   // Newer ICU puts a narrow no-break space before AM/PM.
   return s.replace(/[  ]/g, " ");

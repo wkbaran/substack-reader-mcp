@@ -1,6 +1,5 @@
-import { randomBytes } from "node:crypto";
-import { chmod, lstat, mkdir, open, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { lstat, mkdir, readdir, readFile, rm } from "node:fs/promises";
+import { insideDir, withLock as lockFile, writeAtomic } from "job-ledger";
 import { normalizePostUrl } from "../substack/api.js";
 
 // Everything the digest persists lives in one directory (SUBSTACK_DIGEST_DIR) under
@@ -22,9 +21,6 @@ export const KEEP_RUNS = 14;
 export const MAX_REPORTED = 500;
 /** A publication that couldn't be checked for this long is given up on. */
 export const GIVE_UP_MS = 7 * 86_400_000;
-const LOCK_STALE_MS = 60_000;
-const LOCK_WAIT_MS = 10_000;
-const FILE_MODE = 0o644;
 
 export interface PendingPublication {
   name: string;
@@ -126,32 +122,17 @@ export function addReported(list: string[], urls: string[]): { list: string[]; a
   return { list: out.slice(-MAX_REPORTED), added };
 }
 
-/** The later of two ISO times (last_run never moves backwards). */
-export function laterOf(a: string | undefined, b: string): string {
-  if (!a) return b;
-  return Date.parse(a) > Date.parse(b) ? a : b;
-}
-
 // ---- files ----
 
 /**
- * Absolute path of a fixed file name inside the digest directory. Refuses symlinks,
- * so a link planted in the directory can't redirect a write elsewhere.
+ * Absolute path of a fixed file name inside the digest directory, which is
+ * created if missing. job-ledger's insideDir refuses symlinks, so a link planted
+ * in the directory can't redirect a write elsewhere.
  */
 export async function safePath(dir: string, name: string): Promise<string> {
   if (name.includes("/") || name.includes("\\") || name.startsWith(".")) throw new Error(`invalid digest file name ${name}`);
-  let base: string;
-  try {
-    base = await realpath(dir);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
-    await mkdir(dir, { recursive: true, mode: 0o755 });
-    base = await realpath(dir);
-  }
-  const file = join(base, name);
-  const info = await lstat(file).catch(() => null);
-  if (info?.isSymbolicLink()) throw new Error(`${file} is a symlink; refusing to use it.`);
-  return file;
+  await mkdir(dir, { recursive: true, mode: 0o755 });
+  return insideDir(dir, name);
 }
 
 /** Read a digest file, or null if it doesn't exist. */
@@ -167,58 +148,24 @@ export async function readDigestFile(dir: string, name: string): Promise<string 
 
 /** Write-then-rename, keeping the existing file's mode (0644 for new files). */
 export async function atomicWrite(dir: string, name: string, content: string): Promise<void> {
-  const file = await safePath(dir, name);
-  const mode = (await stat(file).catch(() => null))?.mode;
-  const tmp = `${file}.tmp-${process.pid}-${randomBytes(3).toString("hex")}`;
-  try {
-    await writeFile(tmp, content, { mode: FILE_MODE, flag: "wx" });
-    await chmod(tmp, mode !== undefined ? mode & 0o777 : FILE_MODE);
-    await rename(tmp, file);
-  } catch (err) {
-    await rm(tmp, { force: true });
-    throw err;
-  }
+  await writeAtomic(await safePath(dir, name), content);
 }
 
 export async function removeDigestFile(dir: string, name: string): Promise<void> {
   await rm(await safePath(dir, name), { force: true });
 }
 
-export class LockBusyError extends Error {}
+export { LockBusyError } from "job-ledger";
 
 /**
- * Run `fn` holding the digest lock (an exclusively created lock file). A lock older
- * than a minute is assumed to belong to a crashed process and is taken over.
+ * Run `fn` holding the digest lock (state.lock). A lock older than a minute is
+ * assumed to belong to a crashed process and is taken over.
  */
-export async function withLock<T>(dir: string, fn: () => Promise<T>, { staleMs = LOCK_STALE_MS, waitMs = LOCK_WAIT_MS, sleep = defaultSleep, now = Date.now } = {}): Promise<T> {
-  const lock = await safePath(dir, FILES.lock);
-  const start = now();
-  for (;;) {
-    try {
-      const handle = await open(lock, "wx", FILE_MODE);
-      await handle.writeFile(`${process.pid} ${new Date(now()).toISOString()}\n`);
-      await handle.close();
-      break;
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-      const info = await stat(lock).catch(() => null);
-      if (info && now() - info.mtimeMs > staleMs) {
-        await rm(lock, { force: true });
-        continue;
-      }
-      if (now() - start >= waitMs) throw new LockBusyError("Another digest call is saving state right now. Wait a few seconds and call this tool again.");
-      await sleep(200);
-    }
-  }
-  try {
-    return await fn();
-  } finally {
-    await rm(lock, { force: true });
-  }
-}
-
-function defaultSleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
+export async function withLock<T>(dir: string, fn: () => Promise<T>, opts: { staleMs?: number; waitMs?: number } = {}): Promise<T> {
+  return lockFile(await safePath(dir, FILES.lock), fn, {
+    ...opts,
+    busyMessage: "Another digest call is saving state right now. Wait a few seconds and call this tool again.",
+  });
 }
 
 /**
@@ -231,15 +178,7 @@ export async function archiveRun(dir: string, runId: string, content: string, ke
   const info = await lstat(runs).catch(() => null);
   if (info && !info.isDirectory()) throw new Error(`${runs} isn't a directory; refusing to use it.`);
   if (!info) await mkdir(runs, { mode: 0o755 });
-  const file = join(runs, `${runId}.json`);
-  const tmp = `${file}.tmp-${process.pid}-${randomBytes(3).toString("hex")}`;
-  try {
-    await writeFile(tmp, content, { mode: FILE_MODE, flag: "wx" });
-    await rename(tmp, file);
-  } catch (err) {
-    await rm(tmp, { force: true });
-    throw err;
-  }
+  await writeAtomic(await insideDir(dir, FILES.runs, `${runId}.json`), content);
   const names = (await readdir(runs)).filter((n) => /^[\w-]+\.json$/.test(n)).sort();
-  for (const n of names.slice(0, Math.max(0, names.length - keep))) await rm(join(runs, n), { force: true });
+  for (const n of names.slice(0, Math.max(0, names.length - keep))) await rm(await insideDir(dir, FILES.runs, n), { force: true });
 }

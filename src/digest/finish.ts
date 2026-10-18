@@ -1,4 +1,4 @@
-import { isoSeconds } from "../time.js";
+import { isoSeconds, laterIso } from "job-ledger";
 import type { RunFile, RunPost } from "./collect.js";
 import { reconcile, renderDigest, renderStatus, type ChatJudgment, type PostJudgment, type Reconciled } from "./render.js";
 import {
@@ -6,7 +6,6 @@ import {
   archiveRun,
   atomicWrite,
   FILES,
-  laterOf,
   loadState,
   readDigestFile,
   removeDigestFile,
@@ -59,7 +58,7 @@ export function applyRun(state: DigestState, run: RunFile, committedAt: string):
   return {
     ...state,
     version: 2,
-    last_run: laterOf(state.last_run, run.fetch_start),
+    last_run: laterIso(state.last_run, run.fetch_start),
     pending_publications: pending,
     runs,
     // Every post in the work list counts as reported, including ones that couldn't be read.

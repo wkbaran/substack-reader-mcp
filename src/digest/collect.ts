@@ -1,9 +1,10 @@
 import { randomBytes } from "node:crypto";
+import { isoSeconds } from "job-ledger";
 import { classifySafely, parseProfile, type Classifier } from "../classifier/index.js";
 import { normalizePostUrl, type PostSummary, type SubstackClient, type Subscription } from "../substack/api.js";
 import { SubstackChat, type ChatActivity } from "../substack/chat.js";
 import { AuthError } from "../substack/http.js";
-import { formatDay, formatLocal, formatShort, isoSeconds, parseSince } from "../time.js";
+import { formatDay, formatLocal, formatShort, parseSince } from "../time.js";
 import { atomicWrite, FILES, GIVE_UP_MS, loadState, readDigestFile, withLock } from "./state.js";
 
 // digest_begin: everything deterministic before the model reads anything. Fetch,

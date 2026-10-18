@@ -126,7 +126,7 @@ A worked example of a whole run, with each tool's arguments and output: [docs/di
   - picks worth reading in full, each with a summary and a reason
   - everything else, grouped by publication
   - chats, with anything addressed to you first
-- **What the model does:** only the judging. Fetching, retries, state and layout are code, so the whole digest can run on a local 27B model.
+- **What the model does:** only the judging. Fetching, retries, state and layout are code, so the whole digest can run on a local 27B model. State files and locks use [job-ledger](https://www.npmjs.com/package/job-ledger).
 
 **Setup**
 

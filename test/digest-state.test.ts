@@ -151,8 +151,7 @@ describe("atomicWrite", () => {
 describe("withLock", () => {
   it("waits for a held lock, then reports it busy", async () => {
     await writeFile(join(dir, "state.lock"), "123");
-    let clock = 0;
-    await expect(withLock(dir, async () => "ran", { now: () => clock, sleep: async (ms) => void (clock += ms), waitMs: 1000 })).rejects.toBeInstanceOf(LockBusyError);
+    await expect(withLock(dir, async () => "ran", { waitMs: 150 })).rejects.toBeInstanceOf(LockBusyError);
   });
 
   it("takes over a stale lock and releases it afterwards", async () => {

@@ -109,7 +109,7 @@ How to name things:
 
 | Tool | What it does |
 |---|---|
-| `digest_begin` | Fetches every new post and chat activity, and returns a work list with refs (`P1`, `P2`, …) |
+| `digest_begin` | Fetches every new post and chat activity, and returns a work list with refs (`P1`, `P2`, …). The same list is also in `structuredContent`, for clients that run the digest from code |
 | `digest_finish` | Takes a verdict per post and chat, renders the message and saves state. Safe to repeat |
 | `digest_status` · `mark_reported` | Inspect the state · repair it |
 | `save_interests_proposal` | Saves a drafted `interests.md` as `interests.proposed.md`, never over the real one |

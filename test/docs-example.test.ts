@@ -100,8 +100,8 @@ const routes = {
       { membership_state: "subscribed", publication: PUBS.kitchen },
     ],
   }),
-  "https://systemsnotes.substack.com/api/v1/archive?sort=new&offset=0&limit=20": archive("systems"),
-  "https://fieldkitchen.substack.com/api/v1/archive?sort=new&offset=0&limit=20": archive("kitchen"),
+  "https://systemsnotes.substack.com/api/v1/archive?sort=new&limit=20": archive("systems"),
+  "https://fieldkitchen.substack.com/api/v1/archive?sort=new&limit=20": archive("kitchen"),
   "https://systemsnotes.substack.com/api/v1/posts/replication-lag": {
     body: {
       ...raw(POSTS[0]!, 0),

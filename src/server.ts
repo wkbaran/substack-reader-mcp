@@ -18,7 +18,7 @@ import { digestBegin } from "./digest/collect.js";
 import { digestFinish, digestStatus, isPostRef, markReported, resolvePostRef } from "./digest/finish.js";
 import { formatLocal, parseSince } from "./time.js";
 
-const VERSION = "0.7.0";
+const VERSION = "0.7.1";
 
 /**
  * Hands out a client for the current credentials. Credentials are re-read on
@@ -155,7 +155,7 @@ export function createServer(provider = new ClientProvider(), opts: ServerOption
       description: "Recent posts from one publication.",
       inputSchema: {
         publication: z.string().describe('Publication name, subdomain, or URL (e.g. "Platformer", "platformer", "https://www.platformer.news").'),
-        limit: z.number().int().min(1).max(50).default(10),
+        limit: z.number().int().min(1).max(25).default(10),
         offset: z.number().int().min(0).default(0).describe("Skip this many posts, for paging back through the archive."),
       },
       annotations: readOnly,
@@ -230,7 +230,7 @@ export function createServer(provider = new ClientProvider(), opts: ServerOption
       inputSchema: {
         publication: z.string().describe("Publication name, subdomain, or URL."),
         query: z.string().min(1),
-        limit: z.number().int().min(1).max(50).default(10),
+        limit: z.number().int().min(1).max(25).default(10),
       },
       annotations: readOnly,
     },

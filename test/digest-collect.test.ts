@@ -21,7 +21,9 @@ const PROFILE = {
   ],
 };
 
-const archive = (sub: string, offset = 0, limit = 20) => `https://${sub}.substack.com/api/v1/archive?sort=new&offset=${offset}&limit=${limit}`;
+// The archive pages by cursor; here a page's cursor is "c" + the offset it starts at.
+const archive = (sub: string, offset = 0, limit = 20) =>
+  `https://${sub}.substack.com/api/v1/archive?sort=new&limit=${limit}${offset ? `&cursor=c${offset}` : ""}`;
 const p = (sub: string, n: number, date: string, extra: Record<string, unknown> = {}) => ({
   id: n,
   title: `${sub} ${n}`,
@@ -96,11 +98,11 @@ describe("digestBegin", () => {
     expect(text).toMatch(/1 carried over from earlier runs/);
   });
 
-  it("pages back at offset 20 when a whole page is new", async () => {
+  it("pages back by cursor when a whole page is new", async () => {
     const page1 = Array.from({ length: 20 }, (_, i) => p("alpha", 100 + i, `2026-10-02T${String(11 - Math.floor(i / 2)).padStart(2, "0")}:${i % 2 ? "30" : "00"}:00Z`));
     const { begin, requests } = setup({
-      [archive("alpha")]: { body: page1 },
-      [archive("alpha", 20)]: { body: [p("alpha", 200, "2026-10-01T13:00:00Z"), p("alpha", 201, "2026-09-01T00:00:00Z")] },
+      [archive("alpha")]: { body: { posts: page1, nextCursor: "c20" } },
+      [archive("alpha", 20)]: { body: { posts: [p("alpha", 200, "2026-10-01T13:00:00Z"), p("alpha", 201, "2026-09-01T00:00:00Z")], nextCursor: "c40" } },
     });
     await writeState({ last_run: LAST, reported_posts: [] });
     const { run } = await begin();

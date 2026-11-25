@@ -85,13 +85,13 @@ describe("SubstackClient", () => {
         status: 303,
         headers: { location: "/", "set-cookie": "connect.sid=custom; Path=/" },
       },
-      "https://newsletter.pragmaticengineer.com/api/v1/archive?sort=new&offset=0&limit=2": customAuthed([
+      "https://newsletter.pragmaticengineer.com/api/v1/archive?sort=new&limit=2": customAuthed([
         post(11, "2026-09-20T10:00:00Z"),
         post(12, "2026-09-01T10:00:00Z", { audience: "only_paid" }),
       ]),
-      "https://astralcodexten.substack.com/api/v1/archive?sort=new&offset=0&limit=2": { body: [post(21, "2026-09-22T10:00:00Z")] },
-      "https://broken.substack.com/api/v1/archive?sort=new&offset=0&limit=2": { status: 404 },
-      "https://newsletter.pragmaticengineer.com/api/v1/archive?sort=new&offset=0&limit=5&search=kubernetes": { body: [post(31, "2025-05-14T00:00:00Z")] },
+      "https://astralcodexten.substack.com/api/v1/archive?sort=new&limit=2": { body: [post(21, "2026-09-22T10:00:00Z")] },
+      "https://broken.substack.com/api/v1/archive?sort=new&limit=2": { status: 404 },
+      "https://newsletter.pragmaticengineer.com/api/v1/archive?sort=new&limit=5&search=kubernetes": { body: [post(31, "2025-05-14T00:00:00Z")] },
     });
     return { c: new SubstackClient(new SubstackHttp({ sid: SID, fetch, sleep: async () => {} })), requests };
   }
@@ -125,6 +125,17 @@ describe("SubstackClient", () => {
       expect((await c.resolvePublication(ref)).baseUrl).toBe("https://newsletter.pragmaticengineer.com");
     }
     expect((await c.resolvePublication("someoneelse")).baseUrl).toBe("https://someoneelse.substack.com");
+  });
+
+  it("reaches an offset by following the archive's cursor, never sending offset", async () => {
+    const { fetch, requests } = fakeFetch({
+      "https://example.substack.com/api/v1/archive?sort=new&limit=4": { body: { posts: [post(1, "2026-09-03T00:00:00Z"), post(2, "2026-09-02T00:00:00Z"), post(3, "2026-09-01T00:00:00Z")], nextCursor: "n1" } },
+      "https://example.substack.com/api/v1/archive?sort=new&limit=1&cursor=n1": { body: { posts: [post(4, "2026-08-31T00:00:00Z")], nextCursor: "n2" } },
+    });
+    const c = new SubstackClient(new SubstackHttp({ fetch, sleep: async () => {} }));
+    const posts = await c.posts("https://example.substack.com", { offset: 2, limit: 2 });
+    expect(posts.map((p) => p.id)).toEqual([3, 4]);
+    expect(requests.every((r) => !r.url.includes("offset="))).toBe(true);
   });
 
   it("searches a publication's archive", async () => {
@@ -212,7 +223,9 @@ describe("postsSince and the feed retry pass", () => {
       { membership_state: "free_signup", publication: { id: 2, name: "Beta", subdomain: "beta" } },
     ],
   };
-  const archive = (sub: string, offset: number, limit: number) => `https://${sub}.substack.com/api/v1/archive?sort=new&offset=${offset}&limit=${limit}`;
+  // The archive pages by cursor; here page N's cursor is "c" + the offset it starts at.
+  const archive = (sub: string, offset: number, limit: number) =>
+    `https://${sub}.substack.com/api/v1/archive?sort=new&limit=${limit}${offset ? `&cursor=c${offset}` : ""}`;
 
   function setup(routes: Parameters<typeof fakeFetch>[0]) {
     const { fetch, requests } = fakeFetch({ "https://substack.com/api/v1/user/profile/self": authed(PROFILE), ...routes });
@@ -244,12 +257,12 @@ describe("postsSince and the feed retry pass", () => {
     expect(feed.failed).toEqual([{ publication: "Beta", error: expect.stringMatching(/HTTP 429/), retryable: true }]);
   });
 
-  it("pages back while a page is full and new, using each publication's own cutoff", async () => {
+  it("pages back by cursor while a page is new, using each publication's own cutoff", async () => {
     const full = Array.from({ length: 2 }, (_, i) => post(100 + i, `2026-09-2${5 - i}T00:00:00Z`));
     const { c, requests } = setup({
-      [archive("alpha", 0, 2)]: { body: full },
-      [archive("alpha", 2, 2)]: { body: [post(102, "2026-09-23T00:00:00Z"), post(103, "2026-09-10T00:00:00Z")] },
-      [archive("beta", 0, 2)]: { body: [post(200, "2026-09-25T00:00:00Z"), post(201, "2026-09-24T00:00:00Z")] },
+      [archive("alpha", 0, 2)]: { body: { posts: full, nextCursor: "c2" } },
+      [archive("alpha", 2, 2)]: { body: { posts: [post(102, "2026-09-23T00:00:00Z"), post(103, "2026-09-10T00:00:00Z")], nextCursor: "c4" } },
+      [archive("beta", 0, 2)]: { body: { posts: [post(200, "2026-09-25T00:00:00Z"), post(201, "2026-09-24T00:00:00Z")], nextCursor: "c2" } },
     });
     const subs = await c.subscriptions();
     const since: Record<string, Date> = { Alpha: new Date("2026-09-20T00:00:00Z"), Beta: new Date("2026-09-24T12:00:00Z") };

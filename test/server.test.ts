@@ -142,7 +142,7 @@ describe("digest tools", () => {
       id: 42,
       subscriptions: [{ membership_state: "free_signup", publication: { id: 1, name: "Example", subdomain: "example" } }],
     }),
-    "https://example.substack.com/api/v1/archive?sort=new&offset=0&limit=20": {
+    "https://example.substack.com/api/v1/archive?sort=new&limit=20": {
       body: [
         { id: 2, title: "Fresh take", post_date: "2026-10-02T09:00:00Z", audience: "only_paid", canonical_url: "https://example.substack.com/p/fresh" },
         { id: 3, title: "Second", post_date: "2026-10-02T08:00:00Z", audience: "everyone", canonical_url: "https://example.substack.com/p/second" },
@@ -189,10 +189,10 @@ describe("digest tools", () => {
     });
     const withPodcast = {
       ...routes,
-      "https://example.substack.com/api/v1/archive?sort=new&offset=0&limit=20": {
+      "https://example.substack.com/api/v1/archive?sort=new&limit=20": {
         body: [
           { id: 4, title: "Episode 12", post_date: "2026-10-02T10:00:00Z", audience: "everyone", canonical_url: "https://example.substack.com/p/ep12" },
-          ...(routes["https://example.substack.com/api/v1/archive?sort=new&offset=0&limit=20"].body as unknown[]),
+          ...(routes["https://example.substack.com/api/v1/archive?sort=new&limit=20"].body as unknown[]),
         ],
       },
     };
@@ -331,7 +331,7 @@ describe("digest tools", () => {
 
   it("returns [SILENT] for an empty run and still saves last_run", async () => {
     const client = await connect(
-      { ...routes, "https://example.substack.com/api/v1/archive?sort=new&offset=0&limit=20": { body: [] } },
+      { ...routes, "https://example.substack.com/api/v1/archive?sort=new&limit=20": { body: [] } },
       { digestDir: dir, timezone: "UTC", now: () => NOW, sleep: async () => {} },
     );
     const runId = runIdOf(textOf(await client.callTool({ name: "digest_begin", arguments: {} })));

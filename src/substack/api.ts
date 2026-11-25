@@ -79,7 +79,8 @@ export interface PostSummary {
 }
 
 const SUBSCRIPTIONS_TTL_MS = 10 * 60_000;
-const MAX_PAGE = 50;
+/** The archive endpoint's largest page; it answers 400 above 25 (since November 2026). */
+const MAX_PAGE = 25;
 
 export class SubstackClient {
   private subsCache: { at: number; subs: Subscription[] } | null = null;
@@ -166,13 +167,19 @@ export class SubstackClient {
 
   async posts(publication: string, { limit = 10, offset = 0, search }: { limit?: number; offset?: number; search?: string } = {}): Promise<PostSummary[]> {
     const { baseUrl, name } = await this.resolvePublication(publication);
-    const params = new URLSearchParams({
-      sort: "new",
-      offset: String(Math.max(0, offset)),
-      limit: String(clamp(limit, 1, MAX_PAGE)),
-    });
-    if (search) params.set("search", search);
-    const raw = await this.http.getJson<RawPost[]>(`${baseUrl}/api/v1/archive?${params}`).catch((err: unknown) => {
+    // The archive pages by cursor only, so an offset is reached by reading the pages before it.
+    const want = clamp(limit, 1, MAX_PAGE);
+    const skip = Math.max(0, offset);
+    const out: RawPost[] = [];
+    let cursor: string | undefined;
+    try {
+      for (let page = 0; page < 20; page++) {
+        const res = await this.archiveRequest(baseUrl, { limit: Math.min(MAX_PAGE, skip + want - out.length), cursor, search });
+        out.push(...res.posts);
+        cursor = res.nextCursor;
+        if (out.length >= skip + want || !cursor || res.posts.length === 0) break;
+      }
+    } catch (err) {
       if (err instanceof SubstackError && err.status === 404) {
         throw new SubstackError(
           `No Substack publication found for "${publication}" (tried ${baseUrl}). Use list_subscriptions to see names, or pass the publication's URL.`,
@@ -181,16 +188,31 @@ export class SubstackClient {
         );
       }
       throw err;
-    });
-    return raw.map((p) => summarize(p, name));
+    }
+    return out.slice(skip, skip + want).map((p) => summarize(p, name));
   }
 
-  /** One page of a publication's archive, newest first. */
-  async archivePage(sub: Subscription, offset: number, limit: number): Promise<PostSummary[]> {
-    const raw = await this.http.getJson<RawPost[]>(
-      `${sub.url}/api/v1/archive?sort=new&offset=${Math.max(0, offset)}&limit=${clamp(limit, 1, MAX_PAGE)}`,
-    );
-    return raw.map((p) => summarize(p, sub.name));
+  /**
+   * One request to a publication's archive, newest first. Since November 2026 the
+   * endpoint answers `{ posts, nextCursor }` and rejects `offset`; a plain array
+   * (the old shape) is still accepted, with no next page.
+   */
+  private async archiveRequest(
+    baseUrl: string,
+    { limit, cursor, search }: { limit: number; cursor?: string; search?: string },
+  ): Promise<{ posts: RawPost[]; nextCursor?: string }> {
+    const params = new URLSearchParams({ sort: "new", limit: String(clamp(limit, 1, MAX_PAGE)) });
+    if (search) params.set("search", search);
+    if (cursor) params.set("cursor", cursor);
+    const raw = await this.http.getJson<RawPost[] | { posts?: RawPost[]; nextCursor?: string | null }>(`${baseUrl}/api/v1/archive?${params}`);
+    if (Array.isArray(raw)) return { posts: raw };
+    return { posts: raw.posts ?? [], nextCursor: raw.nextCursor || undefined };
+  }
+
+  /** One page of a publication's archive, newest first, and the cursor for the next page. */
+  async archivePage(sub: Subscription, limit: number, cursor?: string): Promise<{ posts: PostSummary[]; nextCursor?: string }> {
+    const res = await this.archiveRequest(sub.url, { limit, cursor });
+    return { posts: res.posts.map((p) => summarize(p, sub.name)), nextCursor: res.nextCursor };
   }
 
   /**
@@ -214,12 +236,13 @@ export class SubstackClient {
       const posts: PostSummary[] = [];
       let more = false;
       try {
+        let cursor: string | undefined;
         for (let page = 0; page < maxPages; page++) {
-          const batch = await this.archivePage(sub, page * pageSize, pageSize);
+          const { posts: batch, nextCursor } = await this.archivePage(sub, pageSize, cursor);
           posts.push(...batch.filter((p) => timeOf(p.date) >= cutoff));
-          const full = batch.length === pageSize;
-          const allNew = batch.every((p) => timeOf(p.date) >= cutoff);
-          more = full && allNew && since !== undefined;
+          const allNew = batch.length > 0 && batch.every((p) => timeOf(p.date) >= cutoff);
+          cursor = nextCursor;
+          more = Boolean(cursor) && allNew && since !== undefined;
           if (!more) break;
         }
         // `more` is still true only when the page limit stopped the paging.
@@ -462,7 +485,7 @@ export class SubstackClient {
 }
 
 export interface PostsSinceOptions {
-  /** Posts per archive request (default 20). */
+  /** Posts per archive request (default 20, at most 25). */
   pageSize?: number;
   /** Most archive pages per publication (default 5). */
   maxPages?: number;
